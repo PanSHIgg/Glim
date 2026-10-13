@@ -6,7 +6,7 @@
 use bitflags::bitflags;
 
 bitflags! {
-    /// 由终端输出序列切换的应用模式；影响按键编码与渲染。
+    /// 由终端输出序列切换的应用模式；影响按键编码、鼠标报告与渲染。
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct TerminalModes: u16 {
         /// 应用光标模式（DECCKM）：方向键使用 SS3 序列。
@@ -19,6 +19,25 @@ bitflags! {
         const ALT_SCREEN = 1 << 3;
         /// 焦点进入 / 离开时报告。
         const FOCUS_IN_OUT = 1 << 4;
+        /// 按钮按下 / 释放报告（`?1000`）。
+        const MOUSE_REPORT_CLICK = 1 << 5;
+        /// 拖动报告（`?1002`）。
+        const MOUSE_DRAG = 1 << 6;
+        /// 任意移动报告（`?1003`）。
+        const MOUSE_MOTION = 1 << 7;
+        /// SGR 鼠标编码（`?1006`）。
+        const SGR_MOUSE = 1 << 8;
+        /// UTF-8 鼠标编码（`?1005`）。
+        const UTF8_MOUSE = 1 << 9;
+        /// 备用屏幕上滚轮发送方向键（alternate scroll）。
+        const ALTERNATE_SCROLL = 1 << 10;
+    }
+}
+
+impl TerminalModes {
+    /// 终端是否请求鼠标报告（三种报告模式的任意一种）。
+    pub fn mouse_reporting(self) -> bool {
+        self.intersects(Self::MOUSE_REPORT_CLICK | Self::MOUSE_DRAG | Self::MOUSE_MOTION)
     }
 }
 

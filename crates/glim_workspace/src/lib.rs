@@ -5,8 +5,28 @@
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::*;
 
-use glim_terminal_view::{TerminalStatus, TerminalView, TerminalViewEvent};
+use glim_terminal_view::{
+    CloseFind, CopySelection, OpenFind, PasteClipboard, ScrollPageDown, ScrollPageUp,
+    ScrollToBottom, ScrollToTop, TerminalStatus, TerminalView, TerminalViewEvent,
+};
 use glim_ui::{ThemeCapsule, ThemePreference};
+
+/// 终端区域的快捷键：复制粘贴、查找与滚动历史。
+fn bind_terminal_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-shift-c", CopySelection, Some("Terminal")),
+        KeyBinding::new("ctrl-shift-v", PasteClipboard, Some("Terminal")),
+        KeyBinding::new("ctrl-shift-f", OpenFind, Some("Terminal")),
+        // 部分中文输入法把 Ctrl+Shift+F 用作简繁切换，因此同时提供 Ctrl+F
+        // （与 Windows Terminal 的查找快捷键一致）。
+        KeyBinding::new("ctrl-f", OpenFind, Some("Terminal")),
+        KeyBinding::new("escape", CloseFind, Some("Terminal")),
+        KeyBinding::new("shift-pageup", ScrollPageUp, Some("Terminal")),
+        KeyBinding::new("shift-pagedown", ScrollPageDown, Some("Terminal")),
+        KeyBinding::new("ctrl-shift-home", ScrollToTop, Some("Terminal")),
+        KeyBinding::new("ctrl-shift-end", ScrollToBottom, Some("Terminal")),
+    ]);
+}
 
 /// 工作区外壳。
 ///
@@ -22,6 +42,8 @@ pub struct WorkspaceView {
 impl WorkspaceView {
     /// 创建工作区：启动默认 shell 会话。
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        bind_terminal_keys(cx);
+
         let theme_preference = ThemePreference::default();
         let appearance_observer = cx.observe_window_appearance(window, |this, window, cx| {
             if this.theme_preference.is_system() {

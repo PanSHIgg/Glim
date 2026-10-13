@@ -14,6 +14,10 @@ pub struct TerminalPalette {
     pub foreground: Hsla,
     /// 光标颜色。
     pub cursor: Hsla,
+    /// 选择背景色。
+    pub selection: Hsla,
+    /// 查找匹配高亮色（半透明，叠加在背景之上）。
+    pub search_highlight: Hsla,
     /// ANSI 调色板：0–7 基础色，8–15 亮色。
     pub ansi: [Hsla; 16],
 }
@@ -28,11 +32,19 @@ pub fn terminal_palette(cx: &App) -> TerminalPalette {
     }
 }
 
+fn search_highlight(theme: &Theme) -> Hsla {
+    let mut color = theme.warning;
+    color.a = 0.30;
+    color
+}
+
 fn dark_palette(theme: &Theme) -> TerminalPalette {
     TerminalPalette {
         background: theme.background,
         foreground: rgb(0xe6e5db).into(),
         cursor: theme.caret,
+        selection: theme.selection,
+        search_highlight: search_highlight(theme),
         ansi: [
             rgb(0x2a2c28).into(),
             rgb(0xdf9690).into(),
@@ -59,6 +71,8 @@ fn light_palette(theme: &Theme) -> TerminalPalette {
         background: theme.background,
         foreground: rgb(0x30352a).into(),
         cursor: theme.caret,
+        selection: theme.selection,
+        search_highlight: search_highlight(theme),
         ansi: [
             rgb(0x2b2e28).into(),
             rgb(0xa63e3a).into(),

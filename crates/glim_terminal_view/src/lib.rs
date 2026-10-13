@@ -1,22 +1,57 @@
-//! 终端视图：终端绘制、焦点、输入、鼠标、选择与滚动。
+//! 终端视图：终端绘制、焦点、输入、输入法、鼠标、选择与滚动。
 //!
 //! 视图持有一个终端会话：会话在后台运行，视图消费会话事件、
-//! 把键盘输入编码后写入 PTY，并用自定义元素绘制当前快照。
-//! 输入法、选择与滚动在后续阶段加入。
+//! 把键盘与鼠标输入编码后写入 PTY，并用自定义元素绘制当前快照。
+//! 滚动历史、选择、复制粘贴与查找也由本视图管理。
 
 mod element;
+mod find;
+mod ime;
+mod ime_state;
 mod input;
+mod mouse;
 
 use std::sync::Arc;
 
+use gpui_kit::component::input::InputEvent;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use glim_terminal::{GridSnapshot, SessionEvent, SessionEvents, SessionHandle, TerminalOptions};
+use glim_terminal::{
+    GridPoint, GridSelection, GridSnapshot, MouseButton as TerminalMouseButton, MouseEventKind,
+    MouseModifiers, ScrollCommand, SelectionKind, SelectionSide, SessionEvent, SessionEvents,
+    SessionHandle, TerminalOptions,
+};
 use glim_ui::TerminalPalette;
 
-use element::TerminalGridElement;
+use element::{ElementGeometry, SelectionHighlight, TerminalGridElement};
+use find::FindState;
+use ime_state::ImeState;
 use input::keystroke_bytes;
+use mouse::grid_pointer;
+
+actions!(
+    terminal,
+    [
+        /// 复制当前选择。
+        CopySelection,
+        /// 粘贴剪贴板内容。
+        PasteClipboard,
+        /// 打开查找栏。
+        OpenFind,
+        /// 关闭查找栏。
+        CloseFind,
+        /// 上翻一页。
+        ScrollPageUp,
+        /// 下翻一页。
+        ScrollPageDown,
+        /// 滚动到最顶部。
+        ScrollToTop,
+        /// 回到最新输出。
+        ScrollToBottom,
+    ]
+);
 
 /// 会话状态；工作区状态栏据此显示。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +79,28 @@ pub enum TerminalViewEvent {
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
 
+/// 当前选择意图；拖动时持续更新端点。
+struct SelectionState {
+    anchor: GridPoint,
+    anchor_side: SelectionSide,
+    cursor: GridPoint,
+    cursor_side: SelectionSide,
+    kind: SelectionKind,
+    dragging: bool,
+}
+
+impl SelectionState {
+    fn to_grid_selection(&self) -> GridSelection {
+        GridSelection {
+            anchor: self.anchor,
+            anchor_side: self.anchor_side,
+            cursor: self.cursor,
+            cursor_side: self.cursor_side,
+            kind: self.kind,
+        }
+    }
+}
+
 /// 终端视图实体。
 pub struct TerminalView {
     session: Option<SessionHandle>,
@@ -52,7 +109,17 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     shell_label: String,
     applied_size: Option<(u16, u16)>,
+    geometry: Option<ElementGeometry>,
+    selection: Option<SelectionState>,
+    ime: ImeState,
+    find: FindState,
+    /// 滚轮像素累积；避免触控板的小步进被截断丢弃。
+    scroll_accumulator: Pixels,
+    /// 最近一次上报给终端的窗口激活状态。
+    reported_focus: Option<bool>,
     _events_task: Option<Task<()>>,
+    _activation_observer: Subscription,
+    _find_subscription: Subscription,
 }
 
 impl TerminalView {
@@ -67,6 +134,17 @@ impl TerminalView {
             .unwrap_or_else(|| "shell".to_owned());
 
         let focus_handle = cx.focus_handle();
+        let find = FindState::new(window, cx);
+        let find_subscription = cx.subscribe_in(
+            &find.input,
+            window,
+            |this, _input, event: &InputEvent, _window, cx| {
+                this.on_find_event(event, cx);
+            },
+        );
+        let activation_observer = cx.observe_window_activation(window, |this, window, _cx| {
+            this.report_focus(window.is_window_active());
+        });
 
         match SessionHandle::start(&options) {
             Ok((session, events)) => {
@@ -81,7 +159,15 @@ impl TerminalView {
                     focus_handle,
                     shell_label,
                     applied_size: None,
+                    geometry: None,
+                    selection: None,
+                    ime: ImeState::default(),
+                    find,
+                    scroll_accumulator: px(0.),
+                    reported_focus: None,
                     _events_task: Some(events_task),
+                    _activation_observer: activation_observer,
+                    _find_subscription: find_subscription,
                 };
                 view.refresh(cx);
                 window.focus(&view.focus_handle, cx);
@@ -96,7 +182,15 @@ impl TerminalView {
                 focus_handle,
                 shell_label,
                 applied_size: None,
+                geometry: None,
+                selection: None,
+                ime: ImeState::default(),
+                find,
+                scroll_accumulator: px(0.),
+                reported_focus: None,
                 _events_task: None,
+                _activation_observer: activation_observer,
+                _find_subscription: find_subscription,
             },
         }
     }
@@ -133,22 +227,34 @@ impl TerminalView {
         &self.shell_label
     }
 
-    /// 元素测量后上报网格尺寸；尺寸变化时调整会话并刷新快照。
-    pub(crate) fn apply_grid_size(
+    /// 元素测量后上报几何信息；网格尺寸变化时调整会话并刷新快照。
+    pub(crate) fn apply_geometry(
         &mut self,
         columns: u16,
         rows: u16,
-        cell_width: u16,
-        cell_height: u16,
+        geometry: ElementGeometry,
         cx: &mut Context<Self>,
     ) {
+        self.geometry = Some(geometry);
         if self.applied_size == Some((columns, rows)) {
             return;
         }
+        let columns_changed = self
+            .applied_size
+            .is_some_and(|(previous_columns, _)| previous_columns != columns);
         self.applied_size = Some((columns, rows));
+        if columns_changed {
+            // 列数变化会使终端内核中的选择失效；视图侧同步清理。
+            self.selection = None;
+        }
 
         if let Some(session) = &self.session {
-            session.resize(columns, rows, cell_width, cell_height);
+            session.resize(
+                columns,
+                rows,
+                f32::from(geometry.cell_width) as u16,
+                f32::from(geometry.line_height) as u16,
+            );
         }
         self.refresh(cx);
     }
@@ -161,20 +267,411 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    /// 当前终端模式；没有快照时使用默认值。
+    fn modes(&self) -> glim_terminal::TerminalModes {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.modes)
+            .unwrap_or_default()
+    }
+
+    /// 写入 PTY；输入前回到最新输出（标准终端行为）。
+    fn send_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        let scrolled = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.display_offset > 0);
+        if scrolled {
+            if let Some(session) = &self.session {
+                session.scroll(ScrollCommand::Bottom);
+            }
+            self.refresh(cx);
+        }
+        if let Some(session) = &self.session {
+            session.write(bytes);
+        }
+    }
+
+    /// 清除选择（视图与终端内核保持一致）。
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = &self.session {
+            session.set_selection(None);
+        }
+        if self.selection.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() || !self.focus_handle.is_focused(window) {
+            return;
+        }
+        let modes = self.modes();
+        if let Some(bytes) = keystroke_bytes(&event.keystroke, event.prefer_character_input, modes)
+        {
+            self.clear_selection(cx);
+            self.send_input(&bytes, cx);
+            cx.stop_propagation();
+        }
+    }
+
+    /// 上报窗口激活状态；终端的焦点进入 / 离开报告跟随窗口激活。
+    fn report_focus(&mut self, focused: bool) {
+        if self.reported_focus == Some(focused) {
+            return;
+        }
+        self.reported_focus = Some(focused);
+        let modes = self.modes();
+        if let Some(bytes) = glim_terminal::focus_report(focused, modes)
+            && let Some(session) = &self.session
+        {
+            session.write(bytes);
+        }
+    }
+
+    // ---- 鼠标 ----
+
+    fn pointer_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let Some(pointer) = self.pointer_to_grid(event.position) else {
+            return;
+        };
+        let modes = self.modes();
+        let mouse_button = match event.button {
+            MouseButton::Left => TerminalMouseButton::Left,
+            MouseButton::Middle => TerminalMouseButton::Middle,
+            MouseButton::Right => TerminalMouseButton::Right,
+            MouseButton::Navigate(_) => return,
+        };
+
+        if modes.mouse_reporting() && !event.modifiers.shift {
+            let bytes = glim_terminal::encode_mouse_event(
+                MouseEventKind::Press,
+                Some(mouse_button),
+                pointer.point,
+                mouse_modifiers(event.modifiers),
+                modes,
+            );
+            if let Some(bytes) = bytes {
+                self.send_input(&bytes, cx);
+            }
+            return;
+        }
+
+        if event.button != MouseButton::Left {
+            return;
+        }
+
+        let kind = match event.click_count {
+            0 | 1 => SelectionKind::Simple,
+            2 => SelectionKind::Semantic,
+            _ => SelectionKind::Lines,
+        };
+        let selection = SelectionState {
+            anchor: pointer.point,
+            anchor_side: pointer.side,
+            cursor: pointer.point,
+            cursor_side: pointer.side,
+            kind,
+            dragging: true,
+        };
+        if let Some(session) = &self.session {
+            session.set_selection(Some(selection.to_grid_selection()));
+        }
+        self.selection = Some(selection);
+        cx.notify();
+    }
+
+    fn pointer_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(pointer) = self.pointer_to_grid(event.position) else {
+            return;
+        };
+        let modes = self.modes();
+        let pressed = event.pressed_button.and_then(to_terminal_button);
+
+        if modes.mouse_reporting() && !event.modifiers.shift {
+            let kind = MouseEventKind::Move { button: pressed };
+            if let Some(bytes) = glim_terminal::encode_mouse_event(
+                kind,
+                pressed,
+                pointer.point,
+                mouse_modifiers(event.modifiers),
+                modes,
+            ) && let Some(session) = &self.session
+            {
+                session.write(&bytes);
+            }
+            return;
+        }
+
+        let Some(selection) = &mut self.selection else {
+            return;
+        };
+        if !selection.dragging || event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        selection.cursor = pointer.point;
+        selection.cursor_side = pointer.side;
+        let grid_selection = selection.to_grid_selection();
+        if let Some(session) = &self.session {
+            session.set_selection(Some(grid_selection));
+        }
+        self.refresh(cx);
+    }
+
+    fn pointer_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        let Some(pointer) = self.pointer_to_grid(event.position) else {
+            return;
+        };
+        let modes = self.modes();
+
+        if let Some(selection) = &mut self.selection {
+            selection.dragging = false;
+        }
+
+        if modes.mouse_reporting() && !event.modifiers.shift {
+            if let Some(button) = to_terminal_button(event.button)
+                && let Some(bytes) = glim_terminal::encode_mouse_event(
+                    MouseEventKind::Release,
+                    Some(button),
+                    pointer.point,
+                    mouse_modifiers(event.modifiers),
+                    modes,
+                )
+            {
+                self.send_input(&bytes, cx);
+            }
+        } else if let Some(session) = &self.session {
+            // 空选择（单击 / 抖动）在抬起时清理，避免留下不可见的选区。
+            if session.selection_text().is_none() {
+                session.set_selection(None);
+                self.selection = None;
+                self.refresh(cx);
+            }
+        }
+    }
+
+    fn wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if matches!(event.touch_phase, TouchPhase::Started) {
+            self.scroll_accumulator = px(0.);
+        }
+
+        let Some(geometry) = self.geometry else {
+            return;
+        };
+        let lines = match event.delta {
+            ScrollDelta::Pixels(delta) => {
+                self.scroll_accumulator += delta.y;
+                let line_height = geometry.line_height.max(px(1.));
+                let lines = (self.scroll_accumulator / line_height).trunc() as i32;
+                self.scroll_accumulator -= line_height * lines as f32;
+                lines
+            }
+            ScrollDelta::Lines(delta) => delta.y.round() as i32,
+        };
+        if lines == 0 || self.session.is_none() {
+            return;
+        }
+
+        let modes = self.modes();
+
+        if modes.mouse_reporting() && !event.modifiers.shift {
+            if let Some(pointer) = self.pointer_to_grid(event.position) {
+                let kind = if lines > 0 {
+                    MouseEventKind::WheelUp
+                } else {
+                    MouseEventKind::WheelDown
+                };
+                for _ in 0..lines.unsigned_abs() {
+                    if let Some(bytes) = glim_terminal::encode_mouse_event(
+                        kind,
+                        None,
+                        pointer.point,
+                        mouse_modifiers(event.modifiers),
+                        modes,
+                    ) && let Some(session) = &self.session
+                    {
+                        session.write(&bytes);
+                    }
+                }
+            }
+            return;
+        }
+
+        if modes.contains(glim_terminal::TerminalModes::ALT_SCREEN)
+            && modes.contains(glim_terminal::TerminalModes::ALTERNATE_SCROLL)
+        {
+            let bytes = glim_terminal::alternate_scroll_bytes(lines, modes);
+            if let Some(session) = &self.session {
+                session.write(&bytes);
+            }
+            return;
+        }
+
+        if let Some(session) = &self.session {
+            session.scroll(ScrollCommand::Delta(lines));
+        }
+        self.refresh(cx);
+    }
+
+    /// 指针位置对应的网格坐标；几何或快照缺失时返回 `None`。
+    fn pointer_to_grid(&self, position: Point<Pixels>) -> Option<mouse::GridPointer> {
+        let geometry = self.geometry.as_ref()?;
+        let snapshot = self.snapshot.as_ref()?;
+        Some(grid_pointer(
+            geometry,
+            snapshot.columns,
+            snapshot.rows,
+            snapshot.display_offset,
+            position,
+        ))
+    }
+
+    // ---- Actions ----
+
+    fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
-        let modes = self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.modes)
-            .unwrap_or_default();
-        if let Some(bytes) = keystroke_bytes(&event.keystroke, event.prefer_character_input, modes)
+        if let Some(text) = session.selection_text()
+            && !text.is_empty()
         {
-            session.write(&bytes);
-            cx.stop_propagation();
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+    }
+
+    fn paste_clipboard(
+        &mut self,
+        _: &PasteClipboard,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        let bytes = glim_terminal::paste_bytes(&text, self.modes());
+        self.send_input(&bytes, cx);
+    }
+
+    fn open_find(&mut self, _: &OpenFind, window: &mut Window, cx: &mut Context<Self>) {
+        self.find.visible = true;
+        let focus = self.find.input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.run_find(None, true, cx);
+    }
+
+    fn close_find_action(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.visible {
+            self.close_find(window, cx);
+        } else {
+            // 查找栏未打开时 Escape 属于终端输入（如 vim 的普通模式）。
+            cx.propagate();
+        }
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find.visible = false;
+        self.find.current = None;
+        self.find.not_found = false;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    fn scroll_page_up(&mut self, _: &ScrollPageUp, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = &self.session {
+            session.scroll(ScrollCommand::PageUp);
+        }
+        self.refresh(cx);
+    }
+
+    fn scroll_page_down(
+        &mut self,
+        _: &ScrollPageDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = &self.session {
+            session.scroll(ScrollCommand::PageDown);
+        }
+        self.refresh(cx);
+    }
+
+    fn scroll_to_top(&mut self, _: &ScrollToTop, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = &self.session {
+            session.scroll(ScrollCommand::Top);
+        }
+        self.refresh(cx);
+    }
+
+    fn scroll_to_bottom(
+        &mut self,
+        _: &ScrollToBottom,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = &self.session {
+            session.scroll(ScrollCommand::Bottom);
+        }
+        self.refresh(cx);
+    }
+
+    // ---- 查找 ----
+
+    fn on_find_event(&mut self, event: &InputEvent, cx: &mut Context<Self>) {
+        match event {
+            InputEvent::Change => {
+                let query = self.find.input.read(cx).value().to_string();
+                self.find.query = query;
+                self.find.current = None;
+                self.find.not_found = false;
+                self.run_find(None, true, cx);
+            }
+            InputEvent::PressEnter { shift, .. } => {
+                let forward = !shift;
+                let after = self
+                    .find
+                    .current
+                    .map(|current| if forward { current.end } else { current.start });
+                self.run_find(after, forward, cx);
+            }
+            InputEvent::Focus | InputEvent::Blur => {}
+        }
+    }
+
+    fn find_next(&mut self, cx: &mut Context<Self>) {
+        let after = self.find.current.map(|current| current.end);
+        self.run_find(after, true, cx);
+    }
+
+    fn find_previous(&mut self, cx: &mut Context<Self>) {
+        let after = self.find.current.map(|current| current.start);
+        self.run_find(after, false, cx);
+    }
+
+    /// 执行查找：更新当前匹配并滚动到可见位置。
+    fn run_find(&mut self, after: Option<GridPoint>, forward: bool, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if self.find.query.is_empty() {
+            self.find.current = None;
+            self.find.not_found = false;
+            cx.notify();
+            return;
+        }
+        match session.find(&self.find.query, after, forward) {
+            Some(found) => {
+                self.find.current = Some(found);
+                self.find.not_found = false;
+                session.scroll_to_reveal(found.start.line);
+            }
+            None => {
+                self.find.current = None;
+                if after.is_none() {
+                    self.find.not_found = true;
+                }
+            }
+        }
+        self.refresh(cx);
     }
 
     fn render_failed(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -208,23 +705,28 @@ impl TerminalView {
                     .child(self.shell_label.clone()),
             )
     }
-}
 
-impl Render for TerminalView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_terminal(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let palette: TerminalPalette = glim_ui::terminal_palette(cx);
         let focused = self.focus_handle.is_focused(window);
 
         let content = match (&self.session, &self.snapshot) {
-            (Some(_), Some(snapshot)) => TerminalGridElement {
-                view: cx.entity().downgrade(),
-                snapshot: snapshot.clone(),
-                palette,
-                font_family: cx.theme().mono_font_family.clone(),
-                font_size: cx.theme().mono_font_size,
-                focused,
+            (Some(_), Some(snapshot)) => {
+                let search = self.find.current.map(|current| {
+                    SelectionHighlight::from_span(current.to_span(), snapshot.display_offset)
+                });
+                TerminalGridElement {
+                    view: cx.entity(),
+                    snapshot: snapshot.clone(),
+                    palette,
+                    font_family: cx.theme().mono_font_family.clone(),
+                    font_size: cx.theme().mono_font_size,
+                    focused,
+                    preedit: self.ime.preedit.clone().map(SharedString::from),
+                    search,
+                }
+                .into_any_element()
             }
-            .into_any_element(),
             (Some(_), None) => div().into_any_element(),
             (None, _) => self.render_failed(cx).into_any_element(),
         };
@@ -234,6 +736,14 @@ impl Render for TerminalView {
             .track_focus(&self.focus_handle)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_action(cx.listener(Self::copy_selection))
+            .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::close_find_action))
+            .on_action(cx.listener(Self::scroll_page_up))
+            .on_action(cx.listener(Self::scroll_page_down))
+            .on_action(cx.listener(Self::scroll_to_top))
+            .on_action(cx.listener(Self::scroll_to_bottom))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, window, cx| {
@@ -243,5 +753,35 @@ impl Render for TerminalView {
             .bg(palette.background)
             .text_color(palette.foreground)
             .child(content)
+            .into_any_element()
+    }
+}
+
+impl Render for TerminalView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .relative()
+            .size_full()
+            .child(self.render_terminal(window, cx))
+            .when(self.find.visible, |this| {
+                this.child(self.render_find_bar(cx))
+            })
+    }
+}
+
+fn to_terminal_button(button: MouseButton) -> Option<TerminalMouseButton> {
+    match button {
+        MouseButton::Left => Some(TerminalMouseButton::Left),
+        MouseButton::Middle => Some(TerminalMouseButton::Middle),
+        MouseButton::Right => Some(TerminalMouseButton::Right),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+fn mouse_modifiers(modifiers: Modifiers) -> MouseModifiers {
+    MouseModifiers {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        ctrl: modifiers.control,
     }
 }
