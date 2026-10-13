@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>macOS Desktop</title>
+<style>
+  :root {
+    --menubar-h: 26px;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --accent: #0a84ff;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    font-family: var(--font);
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+
+  /* ---------- Wallpaper ---------- */
+  .desktop {
+    position: fixed;
+    inset: 0;
+    background: #10131a;
+    overflow: hidden;
+  }
+
+  .wallpaper {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(120% 90% at 15% 15%, #ff7a59 0%, transparent 45%),
+      radial-gradient(100% 80% at 85% 20%, #b64cff 0%, transparent 50%),
+      radial-gradient(120% 100% at 70% 90%, #0a5cff 0%, transparent 55%),
+      radial-gradient(90% 90% at 20% 85%, #12d1a8 0%, transparent 50%),
+      linear-gradient(160deg, #1b2140 0%, #0b0e18 100%);
+    filter: saturate(1.15);
+    transition: filter .6s ease;
+  }
+  .wallpaper::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(100% 100% at 50% 120%, rgba(0,0,0,.45), transparent 60%);
+  }
+
+  /* ---------- Menu bar ---------- */
+  .menubar {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: var(--menubar-h);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 10px;
+    color: #fff;
+    font-size: 13px;
+    background: rgba(20, 22, 30, .35);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    box-shadow: inset 0 -0.5px 0 rgba(255,255,255,.12);
+    z-index: 1000;
+  }
+  .menubar-left, .menubar-right { display: flex; align-items: center; gap: 2px; }
+  .menu-item {
+    padding: 2px 10px;
+    border-radius: 5px;
+    cursor: default;
+    transition: background .12s;
+  }
+  .menu-item:hover { background: rgba(255,255,255,.2); }
+  .menu-item.app-name { font-weight: 600; }
+  .apple { font-size: 16px; padding: 2px 10px 4px; line-height: 1; }
+
+  .menubar-right { gap: 8px; }
+  .status-icons { display: flex; align-items: center; gap: 7px; opacity: .95; }
+  .status-icons svg { display: block; }
+  .clock { font-variant-numeric: tabular-nums; letter-spacing: .2px; }
+
+  /* ---------- Desktop icons ---------- */
+  .desktop-icons {
+    position: absolute;
+    top: 40px; right: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    z-index: 5;
+  }
+  .d-icon {
+    width: 84px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 4px;
+    border-radius: 8px;
+    cursor: default;
+    text-align: center;
+  }
+  .d-icon .glyph {
+    width: 52px; height: 52px;
+    border-radius: 12px;
+    display: grid; place-items: center;
+    font-size: 28px;
+    box-shadow: 0 4px 10px rgba(0,0,0,.35);
+  }
+  .d-icon .label {
+    font-size: 12px;
+    color: #fff;
+    padding: 1px 6px;
+    border-radius: 4px;
+    text-shadow: 0 1px 3px rgba(0,0,0,.7);
+  }
+  .d-icon.selected .label { background: var(--accent); text-shadow: none; }
+
+  /* ---------- Windows ---------- */
+  .window {
+    position: absolute;
+    min-width: 320px;
+    min-height: 200px;
+    background: rgba(246,246,248,.86);
+    backdrop-filter: blur(30px) saturate(160%);
+    -webkit-backdrop-filter: blur(30px) saturate(160%);
+    border-radius: 12px;
+    box-shadow:
+      0 0 0 .5px rgba(0,0,0,.25),
+      0 24px 60px rgba(0,0,0,.5),
+      0 2px 8px rgba(0,0,0,.3);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    z-index: 10;
+    transition: transform .22s cubic-bezier(.2,.8,.2,1), opacity .22s ease;
+  }
+  .window.focused { box-shadow: 0 0 0 .5px rgba(0,0,0,.3), 0 30px 70px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.35); }
+  .window.minimized { transform: scale(.2) translateY(600px); opacity: 0; pointer-events: none; }
+  .window.closed { display: none; }
+
+  .titlebar {
+    height: 38px;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    background: rgba(236,236,240,.7);
+    box-shadow: inset 0 -0.5px 0 rgba(0,0,0,.12);
+    cursor: default;
+    flex: 0 0 auto;
+  }
+  .window:not(.focused) .titlebar { background: rgba(240,240,242,.75); }
+  .traffic {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .traffic span {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    display: block;
+    position: relative;
+    cursor: pointer;
+  }
+  .t-close { background: #ff5f57; }
+  .t-min   { background: #febc2e; }
+  .t-max   { background: #28c840; }
+  .traffic:hover span::after {
+    content: "";
+    position: absolute; inset: 0;
+    display: grid; place-items: center;
+    color: rgba(0,0,0,.55);
+    font-size: 9px;
+    font-weight: 800;
+  }
+  .window:not(.focused) .traffic span { background: #cfcfd2; }
+
+  .window-title {
+    flex: 1;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 600;
+    color: #3a3a3c;
+    margin-right: 56px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .window:not(.focused) .window-title { color: #9a9a9e; }
+
+  .window-body { flex: 1; overflow: auto; }
+
+  /* Terminal window */
+  .term {
+    background: rgba(24,24,28,.92);
+    color: #e8e8ea;
+    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.55;
+    padding: 12px 14px;
+    height: 100%;
+    user-select: text;
+  }
+  .term .g { color: #5ee6a8; }
+  .term .b { color: #6cb6ff; }
+  .term .y { color: #ffd479; }
+  .term .m { color: #c58bff; }
+  .term .dim { color: #8a8a92; }
+  .term .cursor {
+    display: inline-block;
+    width: 8px; height: 15px;
+    background: #e8e8ea;
+    vertical-align: -2px;
+    animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* Finder window */
+  .finder { display: flex; height: 100%; background: rgba(255,255,255,.55); }
+  .sidebar {
+    width: 170px;
+    background: rgba(232,232,238,.7);
+    padding: 10px 8px;
+    font-size: 13px;
+    flex: 0 0 auto;
+    box-shadow: inset -0.5px 0 0 rgba(0,0,0,.1);
+  }
+  .sidebar h4 { font-size: 11px; color: #8a8a8e; margin: 8px 8px 4px; font-weight: 600; }
+  .sidebar a {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    color: #333;
+    text-decoration: none;
+  }
+  .sidebar a.active { background: rgba(10,132,255,.16); color: #0a6bd6; }
+  .finder-main { flex: 1; padding: 18px; }
+  .finder-main h3 { font-size: 15px; color: #333; margin-bottom: 14px; }
+  .file-grid { display: grid; grid-template-columns: repeat(auto-fill, 96px); gap: 16px 10px; }
+  .file {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    font-size: 12px; color: #333; text-align: center;
+  }
+  .file .glyph { width: 54px; height: 54px; border-radius: 10px; display: grid; place-items: center; font-size: 30px; }
+
+  /* Notes window */
+  .notes { height: 100%; display: flex; flex-direction: column; background: #fffdf5; }
+  .notes .note-body {
+    flex: 1; padding: 18px 22px; font-size: 14px; line-height: 1.7; color: #2c2c2e;
+    overflow: auto; user-select: text;
+  }
+  .notes .note-body h2 { font-size: 18px; margin-bottom: 10px; }
+  .notes .note-body p { margin-bottom: 8px; }
+
+  /* ---------- Dock ---------- */
+  .dock-wrap {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: center;
+    padding-bottom: 6px;
+    z-index: 900;
+    pointer-events: none;
+  }
+  .dock {
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    padding: 7px 10px 8px;
+    border-radius: 22px;
+    background: rgba(255,255,255,.28);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    box-shadow:
+      inset 0 0 0 .5px rgba(255,255,255,.4),
+      0 12px 40px rgba(0,0,0,.45);
+  }
+  .dock-item {
+    position: relative;
+    width: 52px; height: 52px;
+    border-radius: 13px;
+    display: grid; place-items: center;
+    font-size: 30px;
+    cursor: pointer;
+    transform-origin: bottom center;
+    transition: transform .16s cubic-bezier(.2,.8,.2,1), margin .16s cubic-bezier(.2,.8,.2,1);
+    will-change: transform;
+    box-shadow: 0 3px 8px rgba(0,0,0,.3);
+  }
+  .dock-item:hover { transform: scale(1.55) translateY(-6px); margin: 0 8px; }
+  .dock-item:active { transform: scale(1.35) translateY(-2px); }
+  .dock-item .dot {
+    position: absolute;
+    bottom: -6px; left: 50%;
+    transform: translateX(-50%);
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.9);
+    opacity: 0;
+  }
+  .dock-item.running .dot { opacity: 1; }
+  .dock-sep { width: 1px; align-self: stretch; margin: 4px 4px; background: rgba(255,255,255,.35); }
+
+  .dock-tip {
+    position: absolute;
+    bottom: 76px;
+    left: 50%;
+    transform: translateX(-50%) translateY(6px);
+    padding: 4px 10px;
+    font-size: 12px;
+    color: #fff;
+    background: rgba(30,30,34,.85);
+    backdrop-filter: blur(10px);
+    border-radius: 7px;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .14s, transform .14s;
+    box-shadow: 0 4px 14px rgba(0,0,0,.4);
+  }
+  .dock-item:hover .dock-tip { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* App icon gradient tiles */
+  .app-finder  { background: linear-gradient(180deg,#4aa8ff,#0a6bd6); }
+  .app-term    { background: linear-gradient(180deg,#3a3a3e,#111114); }
+  .app-notes   { background: linear-gradient(180deg,#fff6c9,#ffe066); }
+  .app-safari  { background: linear-gradient(180deg,#66d4ff,#0a84ff); }
+  .app-mail    { background: linear-gradient(180deg,#6cc6ff,#1a7bff); }
+  .app-photos  { background: linear-gradient(180deg,#ffffff,#ffd9e8); }
+  .app-settings{ background: linear-gradient(180deg,#c9cdd4,#8e939c); }
+  .app-trash   { background: linear-gradient(180deg,rgba(220,220,225,.75),rgba(180,180,190,.7)); }
+
+  .emoji { filter: drop-shadow(0 1px 1px rgba(0,0,0,.2)); }
+
+  /* Control center popover */
+  .cc-pop {
+    position: absolute;
+    top: 32px; right: 10px;
+    width: 300px;
+    padding: 12px;
+    border-radius: 16px;
+    background: rgba(240,240,245,.72);
+    backdrop-filter: blur(30px) saturate(180%);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+    box-shadow: 0 0 0 .5px rgba(0,0,0,.2), 0 20px 50px rgba(0,0,0,.45);
+    display: none;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    z-index: 1100;
+    color: #1c1c1e;
+  }
+  .cc-pop.open { display: grid; }
+  .cc-card {
+    background: rgba(255,255,255,.65);
+    border-radius: 12px;
+    padding: 10px 12px;
+    font-size: 12px;
+    box-shadow: inset 0 0 0 .5px rgba(0,0,0,.06);
+  }
+  .cc-card.wide { grid-column: span 2; }
+  .cc-card .row { display: flex; align-items: center; justify-content: space-between; }
+  .cc-card strong { font-size: 12px; display: block; }
+  .cc-card small { color: #6c6c70; }
+  .toggle {
+    width: 34px; height: 20px; border-radius: 10px;
+    background: #c7c7cc; position: relative; transition: background .2s;
+  }
+  .toggle.on { background: #34c759; }
+  .toggle::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 16px; height: 16px; border-radius: 50%; background: #fff;
+    transition: left .2s; box-shadow: 0 1px 3px rgba(0,0,0,.3);
+  }
+  .toggle.on::after { left: 16px; }
+  .slider {
+    height: 22px; border-radius: 11px; background: rgba(120,120,128,.25);
+    position: relative; overflow: hidden;
+  }
+  .slider i { position: absolute; inset: 0; width: 70%; background: #fff; border-radius: 11px; }
+
+  .hint {
+    position: absolute;
+    bottom: 74px; left: 50%;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,.85);
+    font-size: 12px;
+    padding: 5px 12px;
+    border-radius: 20px;
+    background: rgba(0,0,0,.28);
+    backdrop-filter: blur(10px);
+    z-index: 800;
+    transition: opacity .5s;
+  }
+  .hint.hide { opacity: 0; }
+</style>
+</head>
+<body>
+  <div class="desktop">
+    <div class="wallpaper" id="wallpaper"></div>
+
+    <!-- Menu bar -->
+    <div class="menubar">
+      <div class="menubar-left">
+        <span class="menu-item apple" title="Apple"></span>
+        <span class="menu-item app-name" id="activeApp">Finder</span>
+        <span class="menu-item">文件</span>
+        <span class="menu-item">编辑</span>
+        <span class="menu-item">显示</span>
+        <span class="menu-item">窗口</span>
+        <span class="menu-item">帮助</span>
+      </div>
+      <div class="menubar-right">
+        <div class="status-icons">
+          <!-- battery -->
+          <svg width="26" height="13" viewBox="0 0 26 13" fill="none">
+            <rect x="0.5" y="0.5" width="21" height="12" rx="3.5" stroke="#fff" stroke-opacity=".85"/>
+            <rect x="2.5" y="2.5" width="15" height="8" rx="2" fill="#fff"/>
+            <rect x="23" y="4" width="2" height="5" rx="1" fill="#fff" fill-opacity=".85"/>
+          </svg>
+          <!-- wifi -->
+          <svg width="17" height="13" viewBox="0 0 17 13" fill="none">
+            <path d="M1 4.2C3.1 2.3 5.9 1.2 8.5 1.2S13.9 2.3 16 4.2" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
+            <path d="M4 7.2C5.3 6.1 6.8 5.5 8.5 5.5s3.2.6 4.5 1.7" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
+            <circle cx="8.5" cy="10.4" r="1.5" fill="#fff"/>
+          </svg>
+          <!-- search -->
+          <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+            <circle cx="6.3" cy="6.3" r="4.6" stroke="#fff" stroke-width="1.6"/>
+            <path d="M9.8 9.8L13.4 13.4" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <!-- control center -->
+          <svg width="16" height="14" viewBox="0 0 16 14" fill="none" id="ccIcon" style="cursor:pointer">
+            <rect x="1" y="1" width="6" height="5.2" rx="1.6" stroke="#fff" stroke-width="1.4"/>
+            <rect x="9" y="1" width="6" height="5.2" rx="1.6" stroke="#fff" stroke-width="1.4"/>
+            <rect x="1" y="7.8" width="6" height="5.2" rx="1.6" stroke="#fff" stroke-width="1.4"/>
+            <rect x="9" y="7.8" width="6" height="5.2" rx="1.6" stroke="#fff" stroke-width="1.4"/>
+          </svg>
+        </div>
+        <span class="clock" id="clock">周一 09:41</span>
+      </div>
+    </div>
+
+    <!-- Control Center popover -->
+    <div class="cc-pop" id="ccPop">
+      <div class="cc-card wide">
+        <div class="row">
+          <div><strong>Wi-Fi</strong><small>Glim-Studio</small></div>
+          <div class="toggle on" data-toggle></div>
+        </div>
+      </div>
+      <div class="cc-card">
+        <div class="row">
+          <div><strong>蓝牙</strong><small>已开启</small></div>
+          <div class="toggle on" data-toggle></div>
+        </div>
+      </div>
+      <div class="cc-card">
+        <div class="row">
+          <div><strong>隔空投送</strong><small>仅联系人</small></div>
+          <div class="toggle" data-toggle></div>
+        </div>
+      </div>
+      <div class="cc-card wide">
+        <strong style="margin-bottom:6px">显示器</strong>
+        <div class="slider" style="margin-top:8px"><i></i></div>
+      </div>
+      <div class="cc-card wide">
+        <strong style="margin-bottom:6px">声音</strong>
+        <div class="slider" style="margin-top:8px"><i style="width:45%"></i></div>
+      </div>
+    </div>
+
+    <!-- Desktop icons -->
+    <div class="desktop-icons">
+      <div class="d-icon">
+        <div class="glyph app-trash"><span class="emoji"></span></div>
+        <span class="label">废纸篓</span>
+      </div>
+      <div class="d-icon">
+        <div class="glyph" style="background:linear-gradient(180deg,#5aa9ff,#0a6bd6)"><span class="emoji"></span></div>
+        <span class="label">项目</span>
+      </div>
+    </div>
+
+    <!-- Finder window -->
+    <section class="window focused" id="win-finder" data-app="Finder" style="left:120px; top:80px; width:620px; height:400px;">
+      <header class="titlebar">
+        <div class="traffic">
+          <span class="t-close" data-act="close"></span>
+          <span class="t-min" data-act="min"></span>
+          <span class="t-max" data-act="max"></span>
+        </div>
+        <div class="window-title">Glim — 工作区</div>
+      </header>
+      <div class="window-body">
+        <div class="finder">
+          <aside class="sidebar">
+            <h4>个人收藏</h4>
+            <a class="active"> 工作区</a>
+            <a> 桌面</a>
+            <a> 文稿</a>
+            <a> 下载</a>
+            <a> 应用程序</a>
+            <h4>标签</h4>
+            <a> 设计稿</a>
+            <a> 终端</a>
+          </aside>
+          <div class="finder-main">
+            <h3>工作区 · 7 个项目</h3>
+            <div class="file-grid">
+              <div class="file"><div class="glyph" style="background:linear-gradient(180deg,#7fb4ff,#3a7bff)"></div><span>crates</span></div>
+              <div class="file"><div class="glyph" style="background:linear-gradient(180deg,#8ee0c0,#25a97c)"></div><span>design</span></div>
+              <div class="file"><div class="glyph" style="background:linear-gradient(180deg,#dcdce2,#a8a8b0)"></div><span>Cargo.toml</span></div>
+              <div class="file"><div class="glyph" style="background:linear-gradient(180deg,#ffd98a,#f0a92e)"></div><span>plan.md</span></div>
+              <div class="file"><div class="glyph" style="background:linear-gradient(180deg,#c9a6ff,#8b5cf6)"></div><span>README.md</span></div>
+              <div class="file"><div class="glyph" style="background:linear-gradient(180deg,#ff9db5,#ff5f7e)"></div><span>.gitignore</span></div>
+              <div class="file"><div class="glyph" style="background:linear-gradient(180deg,#9fd3ff,#5aa0e6)"></div><span>target</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Terminal window -->
+    <section class="window" id="win-term" data-app="终端" style="left:520px; top:220px; width:620px; height:360px;">
+      <header class="titlebar">
+        <div class="traffic">
+          <span class="t-close" data-act="close"></span>
+          <span class="t-min" data-act="min"></span>
+          <span class="t-max" data-act="max"></span>
+        </div>
+        <div class="window-title">glim — zsh — 80×24</div>
+      </header>
+      <div class="window-body">
+        <div class="term" id="term">
+          <div><span class="dim">Last login: Tue Oct 13 21:47:03 on ttys001</span></div>
+          <div><span class="g">➜</span> <span class="b">~/workspace/Glim</span> <span class="y">git:(</span><span class="m">main</span><span class="y">)</span> cargo build</div>
+          <div><span class="dim">   Compiling</span> glim-ui v0.1.0 (/workspace/Glim/crates/glim-ui)</div>
+          <div><span class="dim">   Compiling</span> glim-terminal v0.1.0</div>
+          <div><span class="dim">   Compiling</span> glim-workspace v0.1.0</div>
+          <div><span class="dim">    Finished</span> <span class="g">dev</span> [unoptimized + debuginfo] target(s) in 2.14s</div>
+          <div><span class="g">➜</span> <span class="b">~/workspace/Glim</span> <span class="y">git:(</span><span class="m">main</span><span class="y">)</span> <span class="cursor"></span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Notes window -->
+    <section class="window closed" id="win-notes" data-app="备忘录" style="left:280px; top:140px; width:480px; height:340px;">
+      <header class="titlebar">
+        <div class="traffic">
+          <span class="t-close" data-act="close"></span>
+          <span class="t-min" data-act="min"></span>
+          <span class="t-max" data-act="max"></span>
+        </div>
+        <div class="window-title">备忘录</div>
+      </header>
+      <div class="window-body">
+        <div class="notes">
+          <div class="note-body">
+            <h2>macOS 页面说明</h2>
+            <p>这是一个纯 HTML / CSS / JS 实现的 macOS 桌面模拟页面，无需任何依赖。</p>
+            <p>· 顶部菜单栏带实时时钟与控制中心<br>
+               · 底部 Dock 支持悬停放大<br>
+               · 窗口可拖拽、最小化、最大化、关闭</p>
+            <p>点击 Dock 上的图标即可打开对应应用。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="hint" id="hint">拖动窗口标题栏移动 · 点击 Dock 图标打开应用</div>
+
+    <!-- Dock -->
+    <div class="dock-wrap">
+      <div class="dock" id="dock">
+        <div class="dock-item app-finder running" data-target="win-finder"><span class="emoji"></span><span class="dot"></span><span class="dock-tip">Finder</span></div>
+        <div class="dock-item app-term running" data-target="win-term"><span class="emoji"></span><span class="dot"></span><span class="dock-tip">终端</span></div>
+        <div class="dock-item app-notes" data-target="win-notes"><span class="emoji"></span><span class="dot"></span><span class="dock-tip">备忘录</span></div>
+        <div class="dock-item app-safari" data-target=""><span class="emoji"></span><span class="dock-tip">Safari</span></div>
+        <div class="dock-item app-mail" data-target=""><span class="emoji"></span><span class="dock-tip">邮件</span></div>
+        <div class="dock-item app-photos" data-target=""><span class="emoji"></span><span class="dock-tip">照片</span></div>
+        <div class="dock-sep"></div>
+        <div class="dock-item app-settings" data-target=""><span class="emoji"></span><span class="dock-tip">系统设置</span></div>
+        <div class="dock-item app-trash" data-target=""><span class="emoji"></span><span class="dock-tip">废纸篓</span></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- Live clock ---------- */
+  const WEEK = ["周日","周一","周二","周三","周四","周五","周六"];
+  const clockEl = document.getElementById("clock");
+  function tick() {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    clockEl.textContent = WEEK[d.getDay()] + " " + hh + ":" + mm;
+  }
+  tick();
+  setInterval(tick, 1000 * 10);
+
+  /* ---------- Focus management ---------- */
+  let zTop = 20;
+  const activeAppEl = document.getElementById("activeApp");
+  const windows = Array.from(document.querySelectorAll(".window"));
+
+  function focusWindow(win) {
+    windows.forEach(w => w.classList.remove("focused"));
+    win.classList.add("focused");
+    win.style.zIndex = ++zTop;
+    activeAppEl.textContent = win.dataset.app || "Finder";
+  }
+
+  windows.forEach(win => {
+    win.addEventListener("mousedown", () => focusWindow(win), true);
+  });
+
+  /* ---------- Window dragging ---------- */
+  windows.forEach(win => {
+    const bar = win.querySelector(".titlebar");
+    bar.addEventListener("mousedown", e => {
+      if (e.target.closest(".traffic")) return;
+      const startX = e.clientX, startY = e.clientY;
+      const startL = win.offsetLeft, startT = win.offsetTop;
+      win.style.transition = "none";
+
+      function move(ev) {
+        const nl = Math.min(Math.max(startL + ev.clientX - startX, -win.offsetWidth + 120), window.innerWidth - 120);
+        const nt = Math.min(Math.max(startT + ev.clientY - startY, 26), window.innerHeight - 80);
+        win.style.left = nl + "px";
+        win.style.top = nt + "px";
+      }
+      function up() {
+        win.style.transition = "";
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", up);
+      }
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+      e.preventDefault();
+    });
+  });
+
+  /* ---------- Traffic-light buttons ---------- */
+  document.querySelectorAll(".traffic span").forEach(btn => {
+    btn.addEventListener("mousedown", e => e.stopPropagation());
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const win = btn.closest(".window");
+      const act = btn.dataset.act;
+      if (act === "close") {
+        win.classList.add("closed");
+        win.classList.remove("focused");
+        markDock(win.id, false);
+      } else if (act === "min") {
+        win.classList.add("minimized");
+        markDock(win.id, false);
+      } else if (act === "max") {
+        if (win.dataset.maxed === "1") {
+          win.style.left = win.dataset.ol;
+          win.style.top = win.dataset.ot;
+          win.style.width = win.dataset.ow;
+          win.style.height = win.dataset.oh;
+          win.dataset.maxed = "0";
+        } else {
+          win.dataset.ol = win.style.left;
+          win.dataset.ot = win.style.top;
+          win.dataset.ow = win.style.width;
+          win.dataset.oh = win.style.height;
+          win.style.left = "0px";
+          win.style.top = "26px";
+          win.style.width = "100%";
+          win.style.height = (window.innerHeight - 26) + "px";
+          win.dataset.maxed = "1";
+        }
+      }
+    });
+  });
+
+  /* ---------- Dock ---------- */
+  const dock = document.getElementById("dock");
+  function markDock(winId, running) {
+    const item = dock.querySelector('.dock-item[data-target="' + winId + '"]');
+    if (item) item.classList.toggle("running", running);
+  }
+
+  dock.addEventListener("click", e => {
+    const item = e.target.closest(".dock-item");
+    if (!item) return;
+    const id = item.dataset.target;
+    if (!id) {
+      item.animate(
+        [{ transform: "scale(1)" }, { transform: "scale(1.15)" }, { transform: "scale(1)" }],
+        { duration: 260, easing: "ease-out" }
+      );
+      return;
+    }
+    const win = document.getElementById(id);
+    if (!win) return;
+    if (win.classList.contains("closed")) {
+      win.classList.remove("closed");
+      win.classList.remove("minimized");
+      focusWindow(win);
+      markDock(id, true);
+    } else if (win.classList.contains("minimized")) {
+      win.classList.remove("minimized");
+      focusWindow(win);
+      markDock(id, true);
+    } else if (win.classList.contains("focused")) {
+      win.classList.add("minimized");
+      markDock(id, false);
+    } else {
+      focusWindow(win);
+      markDock(id, true);
+    }
+  });
+
+  /* ---------- Control Center ---------- */
+  const ccIcon = document.getElementById("ccIcon");
+  const ccPop = document.getElementById("ccPop");
+  ccIcon.addEventListener("click", e => {
+    e.stopPropagation();
+    ccPop.classList.toggle("open");
+  });
+  ccPop.addEventListener("click", e => e.stopPropagation());
+  document.addEventListener("click", () => ccPop.classList.remove("open"));
+
+  ccPop.querySelectorAll("[data-toggle]").forEach(t => {
+    t.addEventListener("click", () => t.classList.toggle("on"));
+  });
+
+  /* ---------- Desktop icon selection ---------- */
+  document.querySelectorAll(".d-icon").forEach(icon => {
+    icon.addEventListener("click", e => {
+      e.stopPropagation();
+      document.querySelectorAll(".d-icon").forEach(i => i.classList.remove("selected"));
+      icon.classList.add("selected");
+    });
+  });
+  document.addEventListener("click", () => {
+    document.querySelectorAll(".d-icon").forEach(i => i.classList.remove("selected"));
+  });
+
+  /* ---------- Hint fade ---------- */
+  const hint = document.getElementById("hint");
+  setTimeout(() => hint.classList.add("hide"), 4200);
+
+  /* ---------- Keyboard: Esc blurs control center ---------- */
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") ccPop.classList.remove("open");
+  });
+})();
+</script>
+</body>
+</html>
