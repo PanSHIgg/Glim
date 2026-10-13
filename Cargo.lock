@@ -2018,6 +2018,8 @@ name = "glim_terminal"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "bitflags 2.13.2",
+ "futures",
 ]
 
 [[package]]

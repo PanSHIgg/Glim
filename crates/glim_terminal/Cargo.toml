@@ -6,3 +6,5 @@ publish.workspace = true
 
 [dependencies]
 alacritty_terminal.workspace = true
+bitflags.workspace = true
+futures.workspace = true

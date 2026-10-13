@@ -14,6 +14,10 @@ gpui-kit = "0.7.3"
 # 终端引擎使用 Zed 维护的 Alacritty fork，固定 revision。
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
 
+# 通用小依赖。
+bitflags = "2"
+futures = "0.3"
+
 # 内部 crate，依赖方向见各 crate 的 Cargo.toml。
 glim_settings = { path = "crates/glim_settings" }
 glim_terminal = { path = "crates/glim_terminal" }
