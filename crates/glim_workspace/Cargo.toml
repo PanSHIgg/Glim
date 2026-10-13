@@ -1,0 +1,11 @@
+[package]
+name = "glim_workspace"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+glim_settings.workspace = true
+glim_terminal_view.workspace = true
+glim_ui.workspace = true
