@@ -34,12 +34,16 @@ impl ShellSpec {
         &self.args
     }
 
-    /// 用于界面展示的名称（程序文件名）。
+    /// 用于界面展示的名称（程序文件名，去掉 `.exe` 后缀）。
     pub fn display_name(&self) -> String {
-        PathBuf::from(&self.program)
+        let name = PathBuf::from(&self.program)
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.program.clone())
+            .unwrap_or_else(|| self.program.clone());
+        match name.len().checked_sub(4) {
+            Some(cut) if name[cut..].eq_ignore_ascii_case(".exe") => name[..cut].to_owned(),
+            _ => name,
+        }
     }
 }
 

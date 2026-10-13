@@ -17,6 +17,8 @@ alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev 
 # 通用小依赖。
 bitflags = "2"
 futures = "0.3"
+# 进程信息：子进程检测（关闭确认）与工作目录查询（分屏继承）。
+sysinfo = "0.31"
 
 # 内部 crate，依赖方向见各 crate 的 Cargo.toml。
 glim_settings = { path = "crates/glim_settings" }

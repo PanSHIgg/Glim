@@ -8,6 +8,7 @@ mod input;
 mod keys;
 mod mouse;
 mod options;
+mod process;
 mod selection;
 mod session;
 mod shell;

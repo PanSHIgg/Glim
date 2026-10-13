@@ -9,3 +9,11 @@ gpui-kit.workspace = true
 glim_settings.workspace = true
 glim_terminal_view.workspace = true
 glim_ui.workspace = true
+
+[dev-dependencies]
+# 界面集成测试需要无头窗口与事件模拟；在底层 GPUI crate 上直接开启
+# 测试特性（gpui-kit 的 test-support 会牵入未使用的 gpui-fast 依赖）。
+gpui-base = { version = "0.7.3", features = ["test-support"] }
+gpui-component = { version = "0.7.3", features = ["test-support"] }
+gpui-pre = { version = "=0.3.9", features = ["test-support"] }
+gpui-pre-platform = { version = "=0.3.9", features = ["test-support"] }

@@ -4,6 +4,7 @@
 //! 写入、调整尺寸、滚动、选择与读取快照。
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -104,6 +105,8 @@ pub struct SessionHandle {
     sender: EventLoopSender,
     size: Arc<Mutex<WindowSize>>,
     search: Mutex<Option<SearchCache>>,
+    /// shell 进程 id；无法取得时为 `None`（非 Windows 平台暂不提供）。
+    shell_pid: Option<u32>,
 }
 
 impl SessionHandle {
@@ -128,6 +131,10 @@ impl SessionHandle {
             cell_height: 16,
         };
         let pty = tty::new(&tty_options, size, 0)?;
+        #[cfg(windows)]
+        let shell_pid = pty.child_watcher().pid().map(|pid| pid.get());
+        #[cfg(not(windows))]
+        let shell_pid = None;
 
         let (events, rx) = unbounded();
         let responses = Arc::new(OnceLock::new());
@@ -160,6 +167,7 @@ impl SessionHandle {
                 sender,
                 size: size_shared,
                 search: Mutex::new(None),
+                shell_pid,
             },
             SessionEvents { rx },
         ))
@@ -271,6 +279,20 @@ impl SessionHandle {
     /// 读取当前可视区域快照。
     pub fn snapshot(&self) -> GridSnapshot {
         term_snapshot(&self.term.lock())
+    }
+
+    /// shell 是否仍在运行任务（存在子进程）。
+    ///
+    /// 空闲 shell 没有子进程；前台命令（`cargo`、`git` 等）会作为
+    /// 子进程运行。无法取得进程信息时按空闲处理。
+    pub fn has_running_task(&self) -> bool {
+        self.shell_pid
+            .is_some_and(crate::process::has_running_child)
+    }
+
+    /// shell 的当前工作目录；无法读取时返回 `None`。
+    pub fn working_directory(&self) -> Option<PathBuf> {
+        crate::process::working_directory(self.shell_pid?)
     }
 }
 

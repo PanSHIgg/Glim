@@ -11,7 +11,9 @@ mod ime_state;
 mod input;
 mod mouse;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::input::InputEvent;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
@@ -30,6 +32,9 @@ use find::FindState;
 use ime_state::ImeState;
 use input::keystroke_bytes;
 use mouse::grid_pointer;
+
+/// 工作目录刷新间隔：输出事件频繁，限制进程查询的频率。
+const DIRECTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 actions!(
     terminal,
@@ -77,6 +82,8 @@ pub enum TerminalStatus {
 pub enum TerminalViewEvent {
     /// 会话状态变化（启动失败、退出等）。
     StatusChanged,
+    /// 会话标题变化（OSC 0/2）。
+    TitleChanged,
 }
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
@@ -105,11 +112,19 @@ impl SelectionState {
 
 /// 终端视图实体。
 pub struct TerminalView {
+    /// 会话配置；重启会话时复用（尺寸在启动前覆盖）。
+    options: TerminalOptions,
     session: Option<SessionHandle>,
     status: TerminalStatus,
     snapshot: Option<Arc<GridSnapshot>>,
     focus_handle: FocusHandle,
     shell_label: String,
+    /// 会话标题（OSC 0/2 设置）；工作区用它显示标签名称。
+    title: Option<String>,
+    /// 跟踪到的最近工作目录；输出事件触发刷新（限流），供窗格标题显示。
+    directory: Option<PathBuf>,
+    /// 上次目录刷新时间；限流用。
+    last_directory_check: Option<Instant>,
     applied_size: Option<(u16, u16)>,
     /// 是否已经收到过客户端输出；用于判断客户端控制台是否已经就绪。
     client_ready: bool,
@@ -134,7 +149,32 @@ impl TerminalView {
     /// 会话必须按实际网格尺寸创建：ConPTY 在客户端控制台就绪前会丢弃尺寸调整，
     /// 先按默认 80×24 启动再调整会让客户端停留在错误尺寸（内容错位、清屏不完整）。
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let options = TerminalOptions::default();
+        Self::with_options(TerminalOptions::default(), window, cx)
+    }
+
+    /// 以给定工作目录创建视图；`None` 使用平台默认目录。
+    ///
+    /// 分屏与新标签用它继承当前会话的目录。
+    pub fn with_working_directory(
+        directory: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let options = match directory {
+            Some(directory) => TerminalOptions::default().with_working_directory(directory),
+            None => TerminalOptions::default(),
+        };
+        Self::with_options(options, window, cx)
+    }
+
+    /// 以给定配置创建视图；会话在首次布局拿到实际网格尺寸后启动。
+    ///
+    /// 分屏时通过 [`TerminalOptions::with_working_directory`] 继承当前会话目录。
+    pub fn with_options(
+        options: TerminalOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let shell_label = options
             .shell()
             .cloned()
@@ -156,11 +196,15 @@ impl TerminalView {
         });
 
         let view = Self {
+            options,
             session: None,
             status: TerminalStatus::Starting,
             snapshot: None,
             focus_handle,
             shell_label,
+            title: None,
+            directory: None,
+            last_directory_check: None,
             applied_size: None,
             client_ready: false,
             resize_pending: false,
@@ -183,7 +227,7 @@ impl TerminalView {
         if self.session.is_some() || !matches!(self.status, TerminalStatus::Starting) {
             return;
         }
-        let options = TerminalOptions::default().with_dimensions(columns, rows);
+        let options = self.options.clone().with_dimensions(columns, rows);
         match SessionHandle::start(&options) {
             Ok((session, events)) => {
                 let events_task = cx.spawn(async move |this, cx| {
@@ -193,6 +237,7 @@ impl TerminalView {
                 self.status = TerminalStatus::Running;
                 self.applied_size = Some((columns, rows));
                 self._events_task = Some(events_task);
+                self.refresh_directory();
                 self.refresh(cx);
                 cx.emit(TerminalViewEvent::StatusChanged);
             }
@@ -220,14 +265,38 @@ impl TerminalView {
             self.mark_client_ready();
         }
         match event {
-            SessionEvent::Output => self.refresh(cx),
-            SessionEvent::Title(_) => {}
+            SessionEvent::Output => self.on_output(cx),
+            SessionEvent::Title(title) => {
+                self.title = Some(title);
+                cx.emit(TerminalViewEvent::TitleChanged);
+            }
             SessionEvent::Bell => {}
             SessionEvent::Exited { code } => {
                 self.status = TerminalStatus::Exited { code };
                 self.refresh(cx);
                 cx.emit(TerminalViewEvent::StatusChanged);
             }
+        }
+    }
+
+    /// 输出事件：刷新快照；顺带限流刷新工作目录（供窗格标题显示）。
+    fn on_output(&mut self, cx: &mut Context<Self>) {
+        if self
+            .last_directory_check
+            .is_none_or(|checked| checked.elapsed() >= DIRECTORY_REFRESH_INTERVAL)
+        {
+            self.refresh_directory();
+        }
+        self.refresh(cx);
+    }
+
+    /// 查询 shell 的当前工作目录并缓存；查询失败时保留上一次结果。
+    fn refresh_directory(&mut self) {
+        self.last_directory_check = Some(Instant::now());
+        if let Some(session) = &self.session
+            && let Some(directory) = session.working_directory()
+        {
+            self.directory = Some(directory);
         }
     }
 
@@ -252,6 +321,67 @@ impl TerminalView {
     /// 当前 shell 的展示名。
     pub fn shell_label(&self) -> &str {
         &self.shell_label
+    }
+
+    /// 会话标题（OSC 0/2 设置）；未设置时为 `None`。
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// 跟踪到的最近工作目录；窗格标题用它显示当前位置。
+    pub fn tracked_directory(&self) -> Option<&Path> {
+        self.directory.as_deref()
+    }
+
+    /// 焦点句柄；工作区切换标签或窗格时用它恢复键盘焦点。
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
+    /// shell 是否仍在运行任务（存在子进程）；空闲 shell 为 `false`。
+    pub fn has_running_task(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(SessionHandle::has_running_task)
+    }
+
+    /// shell 的当前工作目录；无法读取时为 `None`。
+    pub fn working_directory(&self) -> Option<PathBuf> {
+        self.session
+            .as_ref()
+            .and_then(SessionHandle::working_directory)
+    }
+
+    /// 会话是否已退出（shell 自行结束）。
+    pub fn has_exited(&self) -> bool {
+        matches!(self.status, TerminalStatus::Exited { .. })
+    }
+
+    /// 会话是否启动失败。
+    pub fn has_failed(&self) -> bool {
+        matches!(self.status, TerminalStatus::Failed { .. })
+    }
+
+    /// 重新启动会话：保留视图身份，替换会话与输出。
+    ///
+    /// shell 自行退出或启动失败后可重新启动；新会话沿用原配置，
+    /// 在下次布局测量到的网格尺寸上创建。
+    pub fn restart(&mut self, cx: &mut Context<Self>) {
+        if self.session.is_some() || matches!(self.status, TerminalStatus::Starting) {
+            return;
+        }
+        self.session = None;
+        self.status = TerminalStatus::Starting;
+        self.snapshot = None;
+        self.applied_size = None;
+        self.client_ready = false;
+        self.resize_pending = false;
+        self.selection = None;
+        self.directory = None;
+        self.last_directory_check = None;
+        self._events_task = None;
+        cx.emit(TerminalViewEvent::StatusChanged);
+        cx.notify();
     }
 
     /// 元素测量后上报几何信息：首次按实际尺寸启动会话，之后网格尺寸变化时调整会话。
