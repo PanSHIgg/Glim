@@ -56,6 +56,8 @@ actions!(
 /// 会话状态；工作区状态栏据此显示。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalStatus {
+    /// 尚未启动；窗口首次布局得到实际网格尺寸后再创建会话。
+    Starting,
     /// 运行中。
     Running,
     /// 已退出；`code` 为退出码，无法取得时为 `None`。
@@ -109,6 +111,10 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     shell_label: String,
     applied_size: Option<(u16, u16)>,
+    /// 是否已经收到过客户端输出；用于判断客户端控制台是否已经就绪。
+    client_ready: bool,
+    /// 客户端就绪前发送过尺寸调整；首个输出后需要重发一次。
+    resize_pending: bool,
     geometry: Option<ElementGeometry>,
     selection: Option<SelectionState>,
     ime: ImeState,
@@ -123,7 +129,10 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    /// 创建视图并启动默认 shell 会话。
+    /// 创建视图：记住默认 shell 的展示名，等首次布局拿到网格尺寸后启动会话。
+    ///
+    /// 会话必须按实际网格尺寸创建：ConPTY 在客户端控制台就绪前会丢弃尺寸调整，
+    /// 先按默认 80×24 启动再调整会让客户端停留在错误尺寸（内容错位、清屏不完整）。
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let options = TerminalOptions::default();
         let shell_label = options
@@ -146,52 +155,54 @@ impl TerminalView {
             this.report_focus(window.is_window_active());
         });
 
+        let view = Self {
+            session: None,
+            status: TerminalStatus::Starting,
+            snapshot: None,
+            focus_handle,
+            shell_label,
+            applied_size: None,
+            client_ready: false,
+            resize_pending: false,
+            geometry: None,
+            selection: None,
+            ime: ImeState::default(),
+            find,
+            scroll_accumulator: px(0.),
+            reported_focus: None,
+            _events_task: None,
+            _activation_observer: activation_observer,
+            _find_subscription: find_subscription,
+        };
+        window.focus(&view.focus_handle, cx);
+        view
+    }
+
+    /// 按实际网格尺寸启动会话；仅在尚未启动时生效。
+    fn start_session(&mut self, columns: u16, rows: u16, cx: &mut Context<Self>) {
+        if self.session.is_some() || !matches!(self.status, TerminalStatus::Starting) {
+            return;
+        }
+        let options = TerminalOptions::default().with_dimensions(columns, rows);
         match SessionHandle::start(&options) {
             Ok((session, events)) => {
                 let events_task = cx.spawn(async move |this, cx| {
                     Self::consume_events(this, events, cx).await;
                 });
-
-                let mut view = Self {
-                    session: Some(session),
-                    status: TerminalStatus::Running,
-                    snapshot: None,
-                    focus_handle,
-                    shell_label,
-                    applied_size: None,
-                    geometry: None,
-                    selection: None,
-                    ime: ImeState::default(),
-                    find,
-                    scroll_accumulator: px(0.),
-                    reported_focus: None,
-                    _events_task: Some(events_task),
-                    _activation_observer: activation_observer,
-                    _find_subscription: find_subscription,
-                };
-                view.refresh(cx);
-                window.focus(&view.focus_handle, cx);
-                view
+                self.session = Some(session);
+                self.status = TerminalStatus::Running;
+                self.applied_size = Some((columns, rows));
+                self._events_task = Some(events_task);
+                self.refresh(cx);
+                cx.emit(TerminalViewEvent::StatusChanged);
             }
-            Err(error) => Self {
-                session: None,
-                status: TerminalStatus::Failed {
+            Err(error) => {
+                self.status = TerminalStatus::Failed {
                     message: error.to_string(),
-                },
-                snapshot: None,
-                focus_handle,
-                shell_label,
-                applied_size: None,
-                geometry: None,
-                selection: None,
-                ime: ImeState::default(),
-                find,
-                scroll_accumulator: px(0.),
-                reported_focus: None,
-                _events_task: None,
-                _activation_observer: activation_observer,
-                _find_subscription: find_subscription,
-            },
+                };
+                cx.emit(TerminalViewEvent::StatusChanged);
+                cx.notify();
+            }
         }
     }
 
@@ -205,6 +216,9 @@ impl TerminalView {
     }
 
     fn handle_session_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
+        if matches!(event, SessionEvent::Output) {
+            self.mark_client_ready();
+        }
         match event {
             SessionEvent::Output => self.refresh(cx),
             SessionEvent::Title(_) => {}
@@ -214,6 +228,19 @@ impl TerminalView {
                 self.refresh(cx);
                 cx.emit(TerminalViewEvent::StatusChanged);
             }
+        }
+    }
+
+    /// 客户端开始输出说明它的控制台已经就绪；此前发送的尺寸调整可能被丢弃。
+    fn mark_client_ready(&mut self) {
+        if self.client_ready {
+            return;
+        }
+        self.client_ready = true;
+        if std::mem::take(&mut self.resize_pending)
+            && let Some(session) = &self.session
+        {
+            session.resend_size();
         }
     }
 
@@ -227,7 +254,7 @@ impl TerminalView {
         &self.shell_label
     }
 
-    /// 元素测量后上报几何信息；网格尺寸变化时调整会话并刷新快照。
+    /// 元素测量后上报几何信息：首次按实际尺寸启动会话，之后网格尺寸变化时调整会话。
     pub(crate) fn apply_geometry(
         &mut self,
         columns: u16,
@@ -236,6 +263,12 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         self.geometry = Some(geometry);
+        if self.session.is_none() {
+            // 会话按首次测量到的实际网格尺寸创建，避免启动后再调整尺寸
+            // （ConPTY 在客户端就绪前会丢弃调整）。
+            self.start_session(columns, rows, cx);
+            return;
+        }
         if self.applied_size == Some((columns, rows)) {
             return;
         }
@@ -255,6 +288,10 @@ impl TerminalView {
                 f32::from(geometry.cell_width) as u16,
                 f32::from(geometry.line_height) as u16,
             );
+            if !self.client_ready {
+                // 客户端就绪前的调整可能被丢弃，首个输出后重发一次。
+                self.resize_pending = true;
+            }
         }
         self.refresh(cx);
     }
@@ -710,25 +747,27 @@ impl TerminalView {
         let palette: TerminalPalette = glim_ui::terminal_palette(cx);
         let focused = self.focus_handle.is_focused(window);
 
-        let content = match (&self.session, &self.snapshot) {
-            (Some(_), Some(snapshot)) => {
-                let search = self.find.current.map(|current| {
+        // 启动失败时显示失败信息；其余情况（含尚未启动）都渲染网格元素，
+        // 由元素测量并上报实际几何，视图据此按正确尺寸启动会话。
+        let content = if matches!(self.status, TerminalStatus::Failed { .. }) {
+            self.render_failed(cx).into_any_element()
+        } else {
+            let search = self.snapshot.as_ref().and_then(|snapshot| {
+                self.find.current.map(|current| {
                     SelectionHighlight::from_span(current.to_span(), snapshot.display_offset)
-                });
-                TerminalGridElement {
-                    view: cx.entity(),
-                    snapshot: snapshot.clone(),
-                    palette,
-                    font_family: cx.theme().mono_font_family.clone(),
-                    font_size: cx.theme().mono_font_size,
-                    focused,
-                    preedit: self.ime.preedit.clone().map(SharedString::from),
-                    search,
-                }
-                .into_any_element()
+                })
+            });
+            TerminalGridElement {
+                view: cx.entity(),
+                snapshot: self.snapshot.clone(),
+                palette,
+                font_family: cx.theme().mono_font_family.clone(),
+                font_size: cx.theme().mono_font_size,
+                focused,
+                preedit: self.ime.preedit.clone().map(SharedString::from),
+                search,
             }
-            (Some(_), None) => div().into_any_element(),
-            (None, _) => self.render_failed(cx).into_any_element(),
+            .into_any_element()
         };
 
         h_flex()

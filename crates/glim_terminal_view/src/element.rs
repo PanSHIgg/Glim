@@ -62,9 +62,12 @@ impl SelectionHighlight {
 }
 
 /// 终端网格元素；每次渲染按当前快照重建，不保留状态。
+///
+/// 会话尚未启动时快照为 `None`：元素仍参与测量并上报几何信息，
+/// 视图据此按实际网格尺寸启动会话。
 pub(crate) struct TerminalGridElement {
     pub view: Entity<TerminalView>,
-    pub snapshot: Arc<GridSnapshot>,
+    pub snapshot: Option<Arc<GridSnapshot>>,
     pub palette: TerminalPalette,
     pub font_family: SharedString,
     pub font_size: Pixels,
@@ -166,38 +169,41 @@ impl Element for TerminalGridElement {
 
         let search = self.search;
 
-        for (row, line) in self.snapshot.lines.iter().enumerate() {
-            let painter = LinePainter {
-                palette: &self.palette,
-                origin,
-                cell_width: geometry.geometry.cell_width,
-                line_height: geometry.geometry.line_height,
-                row_y: origin.y + geometry.geometry.line_height * row as f32,
-                row: row as i32,
-                cursor: self.snapshot.cursor.filter(|cursor| cursor.row == row),
-                focused: self.focused,
-                search,
-                font_family: &self.font_family,
-                font_size: self.font_size,
-            };
-            painter.paint_background(line, window);
-            painter.paint_search(line, window);
-            painter.paint_text(line, window, cx);
-            painter.paint_cursor(window);
-        }
+        // 会话尚未启动时没有快照：只画背景，测量与输入注册照常进行。
+        if let Some(snapshot) = &self.snapshot {
+            for (row, line) in snapshot.lines.iter().enumerate() {
+                let painter = LinePainter {
+                    palette: &self.palette,
+                    origin,
+                    cell_width: geometry.geometry.cell_width,
+                    line_height: geometry.geometry.line_height,
+                    row_y: origin.y + geometry.geometry.line_height * row as f32,
+                    row: row as i32,
+                    cursor: snapshot.cursor.filter(|cursor| cursor.row == row),
+                    focused: self.focused,
+                    search,
+                    font_family: &self.font_family,
+                    font_size: self.font_size,
+                };
+                painter.paint_background(line, window);
+                painter.paint_search(line, window);
+                painter.paint_text(line, window, cx);
+                painter.paint_cursor(window);
+            }
 
-        if let Some(preedit) = &self.preedit {
-            paint_preedit(
-                preedit,
-                &self.palette,
-                origin,
-                &geometry.geometry,
-                &self.snapshot,
-                &self.font_family,
-                self.font_size,
-                window,
-                cx,
-            );
+            if let Some(preedit) = &self.preedit {
+                paint_preedit(
+                    preedit,
+                    &self.palette,
+                    origin,
+                    &geometry.geometry,
+                    snapshot,
+                    &self.font_family,
+                    self.font_size,
+                    window,
+                    cx,
+                );
+            }
         }
 
         let focus_handle = self.view.read(cx).focus_handle.clone();

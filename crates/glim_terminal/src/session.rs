@@ -200,6 +200,15 @@ impl SessionHandle {
             .resize(TermDimensions::new(next.num_lines, next.num_cols));
     }
 
+    /// 重新发送当前尺寸。
+    ///
+    /// 客户端控制台就绪前发送的尺寸调整可能被 ConPTY 丢弃（例如紧随会话创建
+    /// 之后的初始调整），客户端开始输出后重发一次即可确保网格与客户端一致。
+    pub fn resend_size(&self) {
+        let size = *self.size.lock().expect("terminal size lock");
+        let _ = self.sender.send(Msg::Resize(size));
+    }
+
     /// 滚动显示区域（不改变终端内容）。
     pub fn scroll(&self, command: ScrollCommand) {
         let scroll = match command {

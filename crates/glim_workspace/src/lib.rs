@@ -85,6 +85,7 @@ impl WorkspaceView {
         let (dot, shell, status_text) = {
             let terminal = self.terminal.read(cx);
             let (dot, status_text) = match terminal.status() {
+                TerminalStatus::Starting => (cx.theme().muted_foreground, "启动中".to_owned()),
                 TerminalStatus::Running => (cx.theme().success, "运行中".to_owned()),
                 TerminalStatus::Exited { code } => (
                     cx.theme().muted_foreground,
