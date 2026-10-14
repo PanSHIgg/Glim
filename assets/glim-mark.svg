@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
   <title>Glim 标记</title>
-  <desc>与应用图标同一几何的「&gt;_」提示符，单色米金（#c9ba91）。</desc>
+  <desc>与应用图标同一几何的「&gt;_」提示符，单色米金（#c9ba91）；浅色背景改用 #786442。</desc>
   <g fill="none" stroke="#c9ba91" stroke-width="2.44" stroke-linecap="round" stroke-linejoin="round">
     <path d="M5.91 7.13 11.34 12 5.91 16.88"/>
     <path d="M13.31 16.88 18.19 16.88"/>

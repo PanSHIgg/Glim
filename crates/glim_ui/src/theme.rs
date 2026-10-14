@@ -83,7 +83,7 @@ fn light_config() -> ThemeConfig {
     }
 }
 
-/// 深色配色，取自设计稿的主题令牌（`design/styles.css`）。
+/// 深色配色，取自产品主题令牌。
 fn dark_colors() -> ThemeConfigColors {
     let mut colors = ThemeConfigColors::default();
 
@@ -148,7 +148,7 @@ fn dark_colors() -> ThemeConfigColors {
     colors
 }
 
-/// 浅色配色，取自设计稿的主题令牌（`design/styles.css`）。
+/// 浅色配色，取自产品主题令牌。
 fn light_colors() -> ThemeConfigColors {
     let mut colors = ThemeConfigColors::default();
 

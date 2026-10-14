@@ -1,2 +1,6 @@
 # Cargo 构建输出
 /target
+
+# 开发过程资料（设计原型与分阶段计划），不进版本库
+/design/
+/plan.md

@@ -1,25 +1,23 @@
-﻿# 由 design/logo/glim-app-icon.svg 生成图标光栅（仅在改动 SVG 或尺寸列表后重跑）。
+﻿# 由 assets/glim-app-icon.svg 生成 crates/glim/resources/windows/glim.ico
+# （仅在改动 SVG 或尺寸列表后重跑；生成的 .ico 已随仓库提交，日常构建不需要运行本脚本）。
 #
-#   design/logo/glim-app-icon.png          512×512 预览
-#   crates/glim/resources/windows/glim.ico  exe 图标（多尺寸 PNG 条目，资源 ID 1）
+# 渲染使用 Microsoft Edge 无头模式（Windows 10/11 自带），不引入额外依赖：
+# 每个尺寸直接渲染矢量图形一内联 SVG 按目标像素写死宽高（百分比宽高在无头模式下不绘制），
+# 窗口开得比目标尺寸大（截图 = 窗口，客户区比窗口小），再裁剪出左上角的精确像素，
+# 校验圆角透明、瓦片边缘完整后组装 ICO（PNG 条目）。
 #
-# 渲染使用 Microsoft Edge 无头模式（Windows 10/11 自带），不引入额外依赖。
-# 每个尺寸直接渲染矢量图形：内联 SVG 按目标像素写死宽高（百分比宽高在无头模式下不绘制），
-# 窗口开得比目标尺寸大（截图 = 窗口，客户区比窗口小），再裁剪出左上角的精确像素。
-# 文件按 UTF-8 读写（本脚本自身保存为 UTF-8 带 BOM，Windows PowerShell 5.1 才能正确解析中文）。
+# 本文件保存为 UTF-8 带 BOM（Windows PowerShell 5.1 解析中文所需）。
 
 [CmdletBinding()]
 param(
-    [string] $EdgePath,
-    [int] $PreviewSize = 512
+    [string] $EdgePath
 )
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
-$repositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$repositoryRoot = Split-Path $PSScriptRoot -Parent
 $svgPath = Join-Path $PSScriptRoot 'glim-app-icon.svg'
-$previewPath = Join-Path $PSScriptRoot 'glim-app-icon.png'
 $icoPath = Join-Path $repositoryRoot 'crates\glim\resources\windows\glim.ico'
 
 # ICO 内包含的尺寸；256 在目录项中记作 0。
@@ -93,7 +91,7 @@ $inlineSvg
         throw "Edge 未能在 $Size×$Size 下生成截图。"
     }
 
-    # 截图比目标尺寸大：裁剪左上角的 $Size×$Size（目标矩形与源矩形相同，按像素 1:1 拷贝）。
+    # 截图比目标尺寸大，裁剪左上角的 $Size×$Size（目标矩形与源矩形相同，按像素 1:1 拷贝）。
     $bitmap = [System.Drawing.Bitmap]::FromFile($OutputPath)
     try {
         if ($bitmap.Width -lt $Size -or $bitmap.Height -lt $Size) {
@@ -146,11 +144,6 @@ try {
     }
     $renderedSizes = $rendered.Keys | Sort-Object
 
-    # 预览图（不进入 ICO）。
-    $previewSource = Join-Path $workDirectory 'icon-preview.png'
-    Invoke-EdgeScreenshot -Size $PreviewSize -OutputPath $previewSource
-    Copy-Item -LiteralPath $previewSource -Destination $previewPath -Force
-
     # ICO：ICONDIR + ICONDIRENTRY[] + PNG 负载。
     $iconDirectory = Split-Path $icoPath -Parent
     New-Item -ItemType Directory -Path $iconDirectory -Force | Out-Null
@@ -183,7 +176,6 @@ try {
 
     $succeeded = $true
     Write-Output "已生成 $icoPath（$($renderedSizes -join '、') px）"
-    Write-Output "已生成 $previewPath（$PreviewSize×$PreviewSize px）"
 } finally {
     if ($succeeded) {
         Remove-Item -LiteralPath $workDirectory -Recurse -Force -ErrorAction SilentlyContinue
