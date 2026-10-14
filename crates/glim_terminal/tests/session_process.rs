@@ -69,6 +69,38 @@ fn session_reports_working_directory() {
     .expect("the shell process reports its working directory");
 }
 
+/// `cd` 之后会话上报的是新的工作目录；保存工作区取的就是这个值。
+///
+/// Windows PowerShell 的 `cd` 不会同步进程目录，靠启动时注入的提示符
+/// 包装（见 `shell::integration_args`）同步；这条用例也守住那个行为。
+#[test]
+fn session_reports_directory_after_changing_it() {
+    let first = std::env::temp_dir().join("glim-session-cwd-first");
+    let second = std::env::temp_dir().join("glim-session-cwd-second");
+    std::fs::create_dir_all(&first).expect("create first directory");
+    std::fs::create_dir_all(&second).expect("create second directory");
+    let expected = second
+        .canonicalize()
+        .expect("canonicalize second directory");
+
+    let options = TerminalOptions::default().with_working_directory(first);
+    let (session, _events) = SessionHandle::start(&options).expect("start session");
+    wait_for_text(&session, ">", STARTUP_TIMEOUT).expect("shell prints a prompt");
+
+    session.write(format!("cd \"{}\"\r", second.display()).as_bytes());
+    wait_for(
+        || {
+            session
+                .working_directory()
+                .and_then(|path| path.canonicalize().ok())
+                .is_some_and(|path| path == expected)
+        },
+        STARTUP_TIMEOUT,
+        "the changed working directory to be reported",
+    )
+    .expect("the shell process reports the directory it changed to");
+}
+
 /// 轮询直到条件成立。
 fn wait_for(condition: impl Fn() -> bool, timeout: Duration, what: &str) -> Result<(), String> {
     let deadline = Instant::now() + timeout;

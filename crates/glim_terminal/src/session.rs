@@ -114,7 +114,13 @@ impl SessionHandle {
     ///
     /// 启动失败（程序不存在、PTY 创建失败等）同步返回错误。
     pub fn start(options: &TerminalOptions) -> io::Result<(Self, SessionEvents)> {
-        let shell = options.shell.clone().or_else(default_shell);
+        let shell = options.shell.clone().or_else(default_shell).map(|spec| {
+            // PowerShell 需要提示符包装才能让进程目录跟随 `cd`（见
+            // [`crate::shell::integration_args`]）；注入的参数排在用户参数之后。
+            let mut args = spec.args().to_vec();
+            args.extend(crate::shell::integration_args(&spec));
+            spec.with_args(args)
+        });
         let tty_options = tty::Options {
             shell: shell
                 .map(|spec| tty::Shell::new(spec.program().to_owned(), spec.args().to_vec())),
