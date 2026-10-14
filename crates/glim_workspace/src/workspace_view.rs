@@ -16,12 +16,14 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, ThemeStyled as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, Sizable as _, ThemeStyled as _, TitleBar, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use glim_settings::{Settings, SettingsEvent, SettingsState};
+use glim_ui::pane_palette;
 
 use glim_terminal::{ShellSpec, TerminalOptions};
 use glim_terminal_view::{TerminalStatus, TerminalView, TerminalViewEvent};
@@ -1345,7 +1347,8 @@ impl WorkspaceView {
 
     // ---- 渲染 ----
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// 顶部标题栏：品牌、标签页与常用操作；平台窗口控件由 `TitleBar` 提供。
+    fn render_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let active_index = self.active_tab_index().unwrap_or(0);
         let tabs: Vec<(TabId, SharedString)> = self
             .tabs
@@ -1353,58 +1356,84 @@ impl WorkspaceView {
             .map(|tab| (tab.id, self.tab_title(tab.id, cx)))
             .collect();
 
-        h_flex()
-            .h_10()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        let brand = h_flex()
+            .gap_2()
+            .pr_6()
+            .child(
+                Icon::new(IconName::Terminal)
+                    .size_4()
+                    .text_color(cx.theme().primary),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+                    .child("Glim"),
+            );
+
+        let tab_bar = TabBar::new("terminal-tabs")
+            .track_scroll(&self.tab_scroll)
+            .min_w_0()
+            .selected_index(active_index)
+            .on_click(cx.listener(|this, index: &usize, window, cx| {
+                this.select_tab_index(*index, window, cx);
+            }))
+            .children(tabs.into_iter().map(|(id, title)| {
+                Tab::new()
+                    .icon(IconName::Terminal)
+                    .label(title)
+                    .min_w(px(112.))
+                    .max_w(px(176.))
+                    .suffix(
+                        Button::new(("tab-close", id.value()))
+                            .icon(IconName::X)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("关闭标签页")
+                            .accessibility_label("关闭标签页")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.close_tab(id, window, cx);
+                            })),
+                    )
+            }));
+
+        let new_tab = Button::new("new-tab")
+            .icon(IconName::Plus)
+            .ghost()
+            .small()
+            .tooltip("新建标签页 · Ctrl+Shift+T")
+            .accessibility_label("新建标签页")
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.open_tab(window, cx);
+            }));
+
+        TitleBar::new()
+            .h(rems(glim_ui::TITLE_BAR_HEIGHT_REMS))
             .bg(cx.theme().title_bar)
             .child(
-                TabBar::new("terminal-tabs")
-                    .track_scroll(&self.tab_scroll)
-                    .max_width(px(200.))
-                    .selected_index(active_index)
-                    .on_click(cx.listener(|this, index: &usize, window, cx| {
-                        this.select_tab_index(*index, window, cx);
-                    }))
-                    .children(tabs.into_iter().map(|(id, title)| {
-                        Tab::new().label(title).suffix(
-                            Button::new(("tab-close", id.value()))
-                                .icon(IconName::X)
-                                .ghost()
-                                .xsmall()
-                                .tooltip("关闭标签页")
-                                .accessibility_label("关闭标签页")
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.close_tab(id, window, cx);
-                                })),
-                        )
-                    })),
-            )
-            .child(
-                Button::new("new-tab")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .tooltip("新建标签页 · Ctrl+Shift+T")
-                    .accessibility_label("新建标签页")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.open_tab(window, cx);
-                    })),
-            )
-            .child(div().flex_1())
-            .child(self.render_split_button())
-            .child(self.render_layout_button(cx))
-            .child(
-                Button::new("open-settings")
-                    .icon(IconName::Settings)
-                    .ghost()
-                    .tooltip("设置 · Ctrl+,")
-                    .accessibility_label("设置")
-                    .on_click(|_, window, cx| {
-                        glim_settings::open_settings_dialog(window, cx);
-                    }),
+                h_flex()
+                    .w_full()
+                    .h_full()
+                    .min_w_0()
+                    .gap_1()
+                    .pr_2()
+                    .child(brand)
+                    .child(tab_bar)
+                    .child(new_tab)
+                    .child(div().flex_1().min_w_0())
+                    .child(self.render_split_button())
+                    .child(self.render_layout_button(cx))
+                    .child(
+                        Button::new("open-settings")
+                            .icon(IconName::Settings)
+                            .ghost()
+                            .tooltip("设置 · Ctrl+,")
+                            .accessibility_label("设置")
+                            .on_click(|_, window, cx| {
+                                glim_settings::open_settings_dialog(window, cx);
+                            }),
+                    ),
             )
             .into_any_element()
     }
@@ -1573,13 +1602,19 @@ impl WorkspaceView {
     ) -> Option<AnyElement> {
         let entry = self.panes.get(&pane)?;
         let view = entry.view.clone();
-        let (title, exited, failed) = {
+        let palette = pane_palette(cx);
+        let (title, process, running, exited, failed) = {
             let terminal = view.read(cx);
-            (
-                pane_heading(terminal),
-                terminal.has_exited(),
-                terminal.has_failed(),
-            )
+            let (process, running, exited, failed) = match terminal.status() {
+                TerminalStatus::Starting => ("启动中".to_owned(), false, false, false),
+                TerminalStatus::Running => match terminal.foreground_process() {
+                    Some(name) => (format!("{name} · 运行中"), true, false, false),
+                    None => (terminal.shell_label().to_owned(), false, false, false),
+                },
+                TerminalStatus::Exited { .. } => ("已退出".to_owned(), false, true, false),
+                TerminalStatus::Failed { .. } => ("启动失败".to_owned(), false, false, true),
+            };
+            (pane_heading(terminal), process, running, exited, failed)
         };
 
         let dragging = self.pane_drag.as_ref().filter(|drag| drag.moved);
@@ -1592,7 +1627,7 @@ impl WorkspaceView {
             .test_support()
             .flex_1()
             .min_w_0()
-            .gap_1()
+            .gap_2()
             .items_center()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1600,22 +1635,43 @@ impl WorkspaceView {
                     this.begin_pane_press(pane, event.position, cx);
                 }),
             )
-            .child(Icon::new(IconName::SquareTerminal).size_3p5())
-            .child(div().flex_1().min_w_0().truncate().text_sm().child(title));
+            .child(
+                Icon::new(IconName::Terminal)
+                    .size_3p5()
+                    .text_color(palette.subtle_foreground),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(title),
+            );
+
+        let process_color = if failed {
+            cx.theme().danger
+        } else if running {
+            cx.theme().muted_foreground
+        } else {
+            palette.subtle_foreground
+        };
 
         let header = h_flex()
-            .h_8()
-            .px_2()
-            .gap_1()
+            .h(rems(glim_ui::PANE_HEADER_HEIGHT_REMS))
+            .pl_4()
+            .pr_2()
+            .gap_2()
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
             .bg(if swapped {
                 cx.theme().primary.alpha(0.12)
             } else if active {
-                cx.theme().title_bar
+                palette.header_active
             } else {
-                cx.theme().background
+                palette.header
             })
             .text_color(if active || swapped {
                 cx.theme().foreground
@@ -1623,18 +1679,18 @@ impl WorkspaceView {
                 cx.theme().muted_foreground
             })
             .child(title_region)
-            .when(exited || failed, |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(if failed {
-                            cx.theme().danger
-                        } else {
-                            cx.theme().muted_foreground
-                        })
-                        .child(if failed { "启动失败" } else { "已退出" }),
-                )
-            })
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(process_color)
+                    .when(running, |this| {
+                        this.child(div().size_1p5().rounded_full().bg(cx.theme().success))
+                    })
+                    .child(process),
+            )
             .child(
                 Button::new(("pane-split", pane.value()))
                     .icon(IconName::Columns2)
@@ -1765,9 +1821,9 @@ impl WorkspaceView {
             .justify_center()
             .gap_3()
             .child(
-                Icon::new(IconName::SquareTerminal)
+                Icon::new(IconName::Terminal)
                     .size_8()
-                    .text_color(cx.theme().muted_foreground),
+                    .text_color(cx.theme().primary),
             )
             .child(
                 div()
@@ -1802,28 +1858,12 @@ impl WorkspaceView {
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let active = self.active_tab_entry().and_then(|tab| tab.active);
-        let (dot, shell, status_text) = match active.and_then(|pane| self.panes.get(&pane)) {
+        let (path, shell) = match active.and_then(|pane| self.panes.get(&pane)) {
             Some(entry) => {
                 let terminal = entry.view.read(cx);
-                let (dot, text) = match terminal.status() {
-                    TerminalStatus::Starting => (cx.theme().muted_foreground, "启动中".to_owned()),
-                    TerminalStatus::Running => (cx.theme().success, "运行中".to_owned()),
-                    TerminalStatus::Exited { code } => (
-                        cx.theme().muted_foreground,
-                        match code {
-                            Some(code) => format!("已退出（代码 {code}）"),
-                            None => "已退出".to_owned(),
-                        },
-                    ),
-                    TerminalStatus::Failed { .. } => (cx.theme().danger, "启动失败".to_owned()),
-                };
-                (dot, terminal.shell_label().to_owned(), text)
+                (pane_heading(terminal), terminal.shell_label().to_owned())
             }
-            None => (
-                cx.theme().muted_foreground,
-                "—".to_owned(),
-                "没有活动终端".to_owned(),
-            ),
+            None => ("没有活动终端".to_owned(), "—".to_owned()),
         };
 
         let pane_count = self
@@ -1839,6 +1879,8 @@ impl WorkspaceView {
             format!("{pane_count} 个窗格")
         };
 
+        let separator = || div().w(px(1.)).h_2p5().bg(cx.theme().border).flex_none();
+
         h_flex()
             .h_9()
             .px_4()
@@ -1848,13 +1890,15 @@ impl WorkspaceView {
             .border_t_1()
             .border_color(cx.theme().status_bar_border)
             .bg(cx.theme().status_bar)
-            .child(div().size_2().rounded_full().bg(dot))
-            .child(shell)
-            .child(div().w(px(1.)).h_2p5().bg(cx.theme().border))
-            .child(status_text)
+            .child(Icon::new(IconName::Terminal).size_3p5().flex_none())
+            .child(div().min_w_0().truncate().child(path))
+            .child(separator())
+            .child(div().flex_none().child(shell))
             .child(div().flex_1())
-            .child(count_text)
-            .child(div().w(px(1.)).h_2p5().bg(cx.theme().border))
+            .child(div().flex_none().child(count_text))
+            .child(separator())
+            .child(div().flex_none().child("UTF-8"))
+            .child(separator())
             .child(
                 ThemeCapsule::new(self.theme_preference).on_select(cx.listener(Self::select_theme)),
             )
@@ -1967,16 +2011,10 @@ impl WorkspaceView {
             .active_tab_entry()
             .and_then(|tab| tab.tree.as_ref())
             .is_some_and(|current| tree.same_shape(current));
-        let (previewed, selected) = self
+        let previewed = self
             .layout
             .as_ref()
-            .map(|panel| {
-                (
-                    panel.preview() == Some(index),
-                    panel.selected == Some(index),
-                )
-            })
-            .unwrap_or((false, false));
+            .is_some_and(|panel| panel.preview() == Some(index));
 
         let theme = cx.theme();
         let cells = tree
@@ -2009,15 +2047,17 @@ impl WorkspaceView {
             })
             .collect::<Vec<_>>();
 
-        let border = if previewed || selected {
+        let border = if previewed {
             theme.primary
         } else {
             theme.border
         };
-        let background = if applied && !previewed {
+        let background = if previewed {
+            theme.primary.alpha(0.12)
+        } else if applied {
             theme.selection
         } else {
-            theme.muted
+            theme.transparent
         };
 
         Button::new(("layout-option", index))
@@ -2047,8 +2087,13 @@ impl WorkspaceView {
                     this.hover_layout_option(None, cx);
                 }
             }))
-            .child(div().relative().w_full().h_10().children(cells))
-            .child(div().text_xs().child(template.name().to_owned()))
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().relative().w_full().h_10().children(cells))
+                    .child(div().text_xs().child(template.name().to_owned())),
+            )
             .into_any_element()
     }
 
@@ -2466,7 +2511,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::nudge_up_action))
             .on_action(cx.listener(Self::nudge_down_action))
             .on_action(cx.listener(Self::reset_split_action))
-            .child(self.render_tab_bar(cx))
+            .child(self.render_title_bar(cx))
             .child(
                 // 分隔线焦点区域：只聚焦分隔线时（`SplitDivider` 上下文）
                 // 方向键调整生效；终端持有焦点时不受影响。

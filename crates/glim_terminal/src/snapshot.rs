@@ -145,6 +145,8 @@ pub struct GridSnapshot {
     pub modes: TerminalModes,
     /// 显示偏移：视口顶部上方的历史行数。
     pub display_offset: usize,
+    /// 滚动历史总行数。
+    pub history_size: usize,
     /// 当前选择范围；`None` 表示没有选择。
     pub selection: Option<SelectionSpan>,
 }

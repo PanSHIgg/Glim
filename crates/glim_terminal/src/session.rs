@@ -290,6 +290,11 @@ impl SessionHandle {
             .is_some_and(crate::process::has_running_child)
     }
 
+    /// 当前前台任务名（shell 后代中最深的进程）；空闲时为 `None`。
+    pub fn foreground_process(&self) -> Option<String> {
+        crate::process::foreground_process(self.shell_pid?)
+    }
+
     /// shell 的当前工作目录；无法读取时返回 `None`。
     pub fn working_directory(&self) -> Option<PathBuf> {
         crate::process::working_directory(self.shell_pid?)
@@ -344,6 +349,7 @@ fn term_snapshot<T: EventListener>(term: &Term<T>) -> GridSnapshot {
         lines,
         modes,
         display_offset: display_offset.max(0) as usize,
+        history_size: term.history_size(),
         selection: selection_span,
     }
 }

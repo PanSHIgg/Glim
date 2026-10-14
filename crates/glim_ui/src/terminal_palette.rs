@@ -18,6 +18,8 @@ pub struct TerminalPalette {
     pub selection: Hsla,
     /// 查找匹配高亮色（半透明，叠加在背景之上）。
     pub search_highlight: Hsla,
+    /// 滚动条滑块颜色。
+    pub scrollbar_thumb: Hsla,
     /// ANSI 调色板：0–7 基础色，8–15 亮色。
     pub ansi: [Hsla; 16],
 }
@@ -45,6 +47,7 @@ fn dark_palette(theme: &Theme) -> TerminalPalette {
         cursor: theme.caret,
         selection: theme.selection,
         search_highlight: search_highlight(theme),
+        scrollbar_thumb: rgb(0x4c4f47).into(),
         ansi: [
             rgb(0x2a2c28).into(),
             rgb(0xdf9690).into(),
@@ -73,6 +76,7 @@ fn light_palette(theme: &Theme) -> TerminalPalette {
         cursor: theme.caret,
         selection: theme.selection,
         search_highlight: search_highlight(theme),
+        scrollbar_thumb: rgb(0xaeb6a0).into(),
         ansi: [
             rgb(0x2b2e28).into(),
             rgb(0xa63e3a).into(),

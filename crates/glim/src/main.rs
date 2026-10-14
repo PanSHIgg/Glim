@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use gpui_kit::AppContext as _;
+use gpui_kit::component::TitleBar;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
@@ -43,11 +44,12 @@ fn main() {
                         .unwrap_or_else(|| WindowBounds::centered(size(px(1200.), px(750.)), cx)),
                 ),
                 window_min_size: Some(size(px(800.), px(600.))),
+                // 自定义标题栏：品牌、标签与窗口控件都由 `TitleBar` 承担。
                 titlebar: Some(TitlebarOptions {
                     title: Some("Glim".into()),
-                    ..Default::default()
+                    ..TitleBar::title_bar_options()
                 }),
-                ..Default::default()
+                ..TitleBar::window_options()
             };
 
             let (handle, _) = gpui_kit::open_window(window_options, cx, |window, cx| {

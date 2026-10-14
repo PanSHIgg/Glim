@@ -132,6 +132,13 @@ fn dark_colors() -> ThemeConfigColors {
     colors.status_bar = color("#1e1f1f");
     colors.status_bar_border = color("#343633");
 
+    // 标签页：非活动与标题栏同色，活动标签回到工作区底色。
+    colors.tab = color("#222323");
+    colors.tab_bar = color("#222323");
+    colors.tab_foreground = color("#a0a19b");
+    colors.tab_active = color("#1a1b1b");
+    colors.tab_active_foreground = color("#f0efe8");
+
     // 滚动条与链接
     colors.scrollbar = color("#1a1b1b");
     colors.scrollbar_thumb = color("#343633");
@@ -190,6 +197,13 @@ fn light_colors() -> ThemeConfigColors {
     colors.status_bar = color("#f3f4ed");
     colors.status_bar_border = color("#d9ddd0");
 
+    // 标签页：非活动与标题栏同色，活动标签回到工作区底色。
+    colors.tab = color("#eeefe9");
+    colors.tab_bar = color("#eeefe9");
+    colors.tab_foreground = color("#656a5e");
+    colors.tab_active = color("#fafbf7");
+    colors.tab_active_foreground = color("#24271f");
+
     // 滚动条与链接
     colors.scrollbar = color("#fafbf7");
     colors.scrollbar_thumb = color("#d9ddd0");
@@ -197,4 +211,32 @@ fn light_colors() -> ThemeConfigColors {
     colors.link = color("#3e687c");
 
     colors
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::component::ActiveTheme as _;
+    use gpui_kit::{Hsla, TestAppContext, rgb};
+
+    /// 设计稿令牌落在主题上：标签页与状态栏颜色参与渲染。
+    #[gpui_kit::test]
+    fn product_tokens_apply_to_theme(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::init(cx);
+        });
+        cx.update(|cx| {
+            let theme = cx.theme();
+            let expected: Hsla = rgb(0x1a1b1b).into();
+            assert_eq!(theme.tab_active, expected, "活动标签使用工作区底色");
+            assert_eq!(theme.tab_bar, rgb(0x222323).into());
+            assert_eq!(theme.tab_foreground, rgb(0xa0a19b).into());
+            assert_eq!(theme.tab_active_foreground, rgb(0xf0efe8).into());
+            assert_eq!(theme.status_bar, rgb(0x1e1f1f).into());
+
+            crate::apply_theme_preference(crate::ThemePreference::Light, None, cx);
+            let theme = cx.theme();
+            assert_eq!(theme.tab_active, rgb(0xfafbf7).into(), "浅色令牌生效");
+        });
+    }
 }

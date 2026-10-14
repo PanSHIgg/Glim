@@ -17,7 +17,17 @@ use glim_ui::TerminalPalette;
 use crate::TerminalView;
 
 /// 行高相对字号的倍数。
-const LINE_HEIGHT_SCALE: f32 = 1.35;
+const LINE_HEIGHT_SCALE: f32 = 1.5;
+/// 终端内容内边距（rem）：上。
+const PADDING_TOP_REMS: f32 = 1.;
+/// 终端内容内边距（rem）：左右。
+const PADDING_SIDE_REMS: f32 = 1.;
+/// 终端内容内边距（rem）：下。
+const PADDING_BOTTOM_REMS: f32 = 1.5;
+/// 滚动条滑块宽度（物理界限）。
+const SCROLLBAR_WIDTH: f32 = 6.;
+/// 滚动条滑块最小高度（物理界限）。
+const SCROLLBAR_MIN_HEIGHT: f32 = 24.;
 /// 竖线光标宽度（物理界限，不随缩放变化）。
 const BEAM_CURSOR_WIDTH: f32 = 2.;
 /// 下划线光标高度（物理界限）。
@@ -175,15 +185,27 @@ impl Element for TerminalGridElement {
             .unwrap_or(self.font_size * 0.6);
         let line_height = self.font_size * LINE_HEIGHT_SCALE;
 
-        let columns = (f32::from(bounds.size.width) / f32::from(cell_width))
+        // 内容内边距按设计稿：上 1rem、左右 1rem、下 1.5rem；网格按内缩后
+        // 的区域测量，滚动条绘制在元素右缘（窗格边缘）。
+        let rem = window.rem_size();
+        let padding_left = rem * PADDING_SIDE_REMS;
+        let padding_top = rem * PADDING_TOP_REMS;
+        let inner_width = (bounds.size.width - padding_left * 2.).max(px(0.));
+        let inner_height =
+            (bounds.size.height - padding_top - rem * PADDING_BOTTOM_REMS).max(px(0.));
+
+        let columns = (f32::from(inner_width) / f32::from(cell_width))
             .floor()
             .max(1.0) as u16;
-        let rows = (f32::from(bounds.size.height) / f32::from(line_height))
+        let rows = (f32::from(inner_height) / f32::from(line_height))
             .floor()
             .max(1.0) as u16;
 
         let geometry = ElementGeometry {
-            origin: bounds.origin,
+            origin: point(
+                bounds.origin.x + padding_left,
+                bounds.origin.y + padding_top,
+            ),
             cell_width,
             line_height,
         };
@@ -207,7 +229,7 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let origin = bounds.origin;
+        let origin = geometry.geometry.origin;
         window.paint_quad(fill(bounds, self.palette.background));
 
         let search = self.search;
@@ -247,6 +269,8 @@ impl Element for TerminalGridElement {
                     cx,
                 );
             }
+
+            paint_scrollbar(bounds, snapshot, &self.palette, window);
         }
 
         let focus_handle = self.view.read(cx).focus_handle.clone();
@@ -658,6 +682,38 @@ fn paint_background_run(
         ),
     };
     window.paint_quad(fill(bounds, color));
+}
+
+/// 绘制滚动条：有滚动历史时在元素右缘显示滑块。
+///
+/// `display_offset` 为 0 时视口在底部（滑块到底），等于历史总行数时
+/// 视口在顶部（滑块到顶）。
+fn paint_scrollbar(
+    bounds: Bounds<Pixels>,
+    snapshot: &GridSnapshot,
+    palette: &TerminalPalette,
+    window: &mut Window,
+) {
+    let total = snapshot.rows + snapshot.history_size;
+    if snapshot.history_size == 0 || total == 0 {
+        return;
+    }
+    let track_height = bounds.size.height;
+    let thumb_height = (track_height * (snapshot.rows as f32 / total as f32))
+        .max(px(SCROLLBAR_MIN_HEIGHT))
+        .min(track_height);
+    let progress = (snapshot
+        .history_size
+        .saturating_sub(snapshot.display_offset)) as f32
+        / snapshot.history_size as f32;
+    let thumb = Bounds {
+        origin: point(
+            bounds.origin.x + bounds.size.width - px(SCROLLBAR_WIDTH) - px(2.),
+            bounds.origin.y + (track_height - thumb_height) * progress,
+        ),
+        size: size(px(SCROLLBAR_WIDTH), thumb_height),
+    };
+    window.paint_quad(fill(thumb, palette.scrollbar_thumb).corner_radii(px(SCROLLBAR_WIDTH / 2.)));
 }
 
 /// 绘制输入法预编辑文本：覆盖原位文本并带下划线，候选窗口跟随此处。

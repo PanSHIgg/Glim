@@ -6,3 +6,10 @@ publish.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true
+
+[dev-dependencies]
+# 主题令牌与窗格配色的界面上下文测试需要无头应用上下文。
+gpui-base = { version = "0.7.3", features = ["test-support"] }
+gpui-component = { version = "0.7.3", features = ["test-support"] }
+gpui-pre = { version = "=0.3.9", features = ["test-support"] }
+gpui-pre-platform = { version = "=0.3.9", features = ["test-support"] }

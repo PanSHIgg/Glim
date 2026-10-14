@@ -2129,7 +2129,11 @@ dependencies = [
 name = "glim_ui"
 version = "0.1.0"
 dependencies = [
+ "gpui-base",
+ "gpui-component",
  "gpui-kit",
+ "gpui-pre",
+ "gpui-pre-platform",
 ]
 
 [[package]]

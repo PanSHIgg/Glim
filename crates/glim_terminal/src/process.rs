@@ -47,6 +47,57 @@ fn process_parents() -> HashMap<u32, u32> {
         .collect()
 }
 
+/// 前台任务：shell 后代中层级最深的进程名（去掉 `.exe` 后缀）。
+///
+/// 用于窗格标题的进程标签；没有子进程时返回 `None`。
+pub(crate) fn foreground_process(shell_pid: u32) -> Option<String> {
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, ProcessRefreshKind::new());
+
+    let mut best: Option<(usize, String)> = None;
+    for (pid, process) in system.processes() {
+        let Some(depth) = descendant_depth(pid.as_u32(), shell_pid, system.processes()) else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(best_depth, _)| depth > *best_depth)
+        {
+            let name = process.name().to_string_lossy().into_owned();
+            best = Some((depth, strip_exe(&name)));
+        }
+    }
+    best.map(|(_, name)| name)
+}
+
+/// `pid` 相对 `root` 的深度；不是后代时返回 `None`。
+fn descendant_depth(
+    pid: u32,
+    root: u32,
+    processes: &HashMap<Pid, sysinfo::Process>,
+) -> Option<usize> {
+    let mut current = pid;
+    for depth in 1..=64 {
+        let parent = processes.get(&Pid::from_u32(current))?.parent()?.as_u32();
+        if parent == root {
+            return Some(depth);
+        }
+        if parent == 0 || parent == current {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
+/// 去掉 Windows 可执行文件后缀。
+fn strip_exe(name: &str) -> String {
+    match name.len().checked_sub(4) {
+        Some(cut) if name[cut..].eq_ignore_ascii_case(".exe") => name[..cut].to_owned(),
+        _ => name.to_owned(),
+    }
+}
+
 /// 是否存在任一进程的祖先为 `root`。
 fn any_descendant(root: u32, parents: &HashMap<u32, u32>) -> bool {
     parents.keys().any(|&pid| is_descendant(pid, root, parents))

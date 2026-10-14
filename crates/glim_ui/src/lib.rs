@@ -5,6 +5,7 @@
 //! 与终端网格调色板（[`terminal_palette`]）。
 
 mod font;
+mod pane_palette;
 mod terminal_palette;
 mod theme;
 mod theme_capsule;
@@ -12,9 +13,10 @@ mod theme_capsule;
 use gpui_kit::App;
 
 pub use font::{
-    FontApplication, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE, apply_appearance,
-    apply_mono_font, default_mono_font_family, default_mono_font_size,
+    DEFAULT_TERMINAL_FONT_SIZE, FontApplication, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
+    apply_appearance, apply_mono_font, default_mono_font_family, default_mono_font_size,
 };
+pub use pane_palette::{PANE_HEADER_HEIGHT_REMS, PanePalette, TITLE_BAR_HEIGHT_REMS, pane_palette};
 pub use terminal_palette::{TerminalPalette, terminal_palette};
 pub use theme::{ThemePreference, apply_theme_preference};
 pub use theme_capsule::ThemeCapsule;

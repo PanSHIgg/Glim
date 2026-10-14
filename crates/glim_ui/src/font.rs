@@ -14,6 +14,8 @@ use crate::{ThemePreference, apply_theme_preference};
 pub const MIN_TERMINAL_FONT_SIZE: f32 = 8.;
 /// 终端字号上限（逻辑像素）。
 pub const MAX_TERMINAL_FONT_SIZE: f32 = 32.;
+/// 产品默认终端字号（设计稿终端正文 0.875rem）。
+pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 14.;
 /// 默认字族的查找顺序。
 const DEFAULT_FAMILIES: &[&str] = &["Cascadia Mono", "Consolas"];
 
@@ -37,15 +39,15 @@ impl Global for TerminalFontDefaults {}
 /// 解析并应用产品默认终端字体；在 `glim_ui` 初始化时调用。
 pub(crate) fn init(cx: &mut App) {
     let platform_default = Theme::global(cx).mono_font_family.clone();
-    let default_size = Theme::global(cx).mono_font_size;
     let installed = cx.text_system().all_font_names();
     let family = pick_family(DEFAULT_FAMILIES, &installed).unwrap_or(platform_default);
     Theme::update(cx, |theme| {
         theme.mono_font_family = family.clone();
+        theme.mono_font_size = px(DEFAULT_TERMINAL_FONT_SIZE);
     });
     cx.set_global(TerminalFontDefaults {
         family,
-        size: default_size,
+        size: px(DEFAULT_TERMINAL_FONT_SIZE),
     });
 }
 

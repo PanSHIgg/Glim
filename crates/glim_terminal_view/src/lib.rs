@@ -127,6 +127,8 @@ pub struct TerminalView {
     directory: Option<PathBuf>,
     /// 上次目录刷新时间；限流用。
     last_directory_check: Option<Instant>,
+    /// 当前前台任务名；输出事件触发刷新（限流），供窗格标题显示。
+    foreground: Option<String>,
     applied_size: Option<(u16, u16)>,
     /// 是否已经收到过客户端输出；用于判断客户端控制台是否已经就绪。
     client_ready: bool,
@@ -213,6 +215,7 @@ impl TerminalView {
             title: None,
             directory: None,
             last_directory_check: None,
+            foreground: None,
             applied_size: None,
             client_ready: false,
             resize_pending: false,
@@ -246,6 +249,7 @@ impl TerminalView {
                 self.applied_size = Some((columns, rows));
                 self._events_task = Some(events_task);
                 self.refresh_directory();
+                self.refresh_foreground();
                 self.refresh(cx);
                 cx.emit(TerminalViewEvent::StatusChanged);
             }
@@ -281,19 +285,21 @@ impl TerminalView {
             SessionEvent::Bell => {}
             SessionEvent::Exited { code } => {
                 self.status = TerminalStatus::Exited { code };
+                self.foreground = None;
                 self.refresh(cx);
                 cx.emit(TerminalViewEvent::StatusChanged);
             }
         }
     }
 
-    /// 输出事件：刷新快照；顺带限流刷新工作目录（供窗格标题显示）。
+    /// 输出事件：刷新快照；顺带限流刷新工作目录与前台任务（供窗格标题显示）。
     fn on_output(&mut self, cx: &mut Context<Self>) {
         if self
             .last_directory_check
             .is_none_or(|checked| checked.elapsed() >= DIRECTORY_REFRESH_INTERVAL)
         {
             self.refresh_directory();
+            self.refresh_foreground();
         }
         self.refresh(cx);
     }
@@ -306,6 +312,14 @@ impl TerminalView {
         {
             self.directory = Some(directory);
         }
+    }
+
+    /// 查询 shell 的前台任务并缓存；空闲或查询失败时清空。
+    fn refresh_foreground(&mut self) {
+        self.foreground = self
+            .session
+            .as_ref()
+            .and_then(SessionHandle::foreground_process);
     }
 
     /// 客户端开始输出说明它的控制台已经就绪；此前发送的尺寸调整可能被丢弃。
@@ -344,6 +358,11 @@ impl TerminalView {
     /// 跟踪到的最近工作目录；窗格标题用它显示当前位置。
     pub fn tracked_directory(&self) -> Option<&Path> {
         self.directory.as_deref()
+    }
+
+    /// 当前前台任务名；空闲时为 `None`。窗格标题显示“任务 · 运行中”。
+    pub fn foreground_process(&self) -> Option<&str> {
+        self.foreground.as_deref()
     }
 
     /// 创建会话时指定的启动目录；用于工作区保存与恢复断言。
@@ -397,6 +416,7 @@ impl TerminalView {
         self.selection = None;
         self.directory = None;
         self.last_directory_check = None;
+        self.foreground = None;
         self._events_task = None;
         cx.emit(TerminalViewEvent::StatusChanged);
         cx.notify();
