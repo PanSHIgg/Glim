@@ -8,18 +8,26 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::button::{
+    Button, ButtonVariant, ButtonVariants as _, Toggle, ToggleVariants as _,
+};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, Sizable as _, ThemeStyled as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use glim_terminal_view::{TerminalStatus, TerminalView, TerminalViewEvent};
 use glim_ui::{ThemeCapsule, ThemePreference};
 
-use crate::pane_tree::{Axis, Direction, PaneId, PaneTree, SplitId, TabId, nearest_in_direction};
+use crate::layout::{LayoutTemplate, templates_for};
+use crate::pane_tree::{
+    Axis, Direction, PaneId, PaneTree, SplitId, TabId, clamp_ratio, nearest_in_direction,
+};
+use crate::split_element::{SplitLayoutOptions, build as build_split_layout};
 
 actions!(
     workspace,
@@ -46,13 +54,55 @@ actions!(
         FocusPaneUp,
         /// 聚焦下方窗格。
         FocusPaneDown,
+        /// 打开 / 关闭布局面板。
+        OpenLayout,
+        /// 应用当前预览的布局方案。
+        ApplyLayout,
+        /// 取消预览、拖动或关闭布局面板。
+        CancelLayout,
+        /// 布局面板：移到上一个方案。
+        PreviousLayout,
+        /// 布局面板：移到下一个方案。
+        NextLayout,
+        /// 布局面板：移到第一个方案。
+        FirstLayout,
+        /// 布局面板：移到最后一个方案。
+        LastLayout,
+        /// 把当前窗格与左侧窗格交换位置。
+        SwapPaneLeft,
+        /// 把当前窗格与右侧窗格交换位置。
+        SwapPaneRight,
+        /// 把当前窗格与上方窗格交换位置。
+        SwapPaneUp,
+        /// 把当前窗格与下方窗格交换位置。
+        SwapPaneDown,
+        /// 分隔线向左调整。
+        NudgeSplitLeft,
+        /// 分隔线向右调整。
+        NudgeSplitRight,
+        /// 分隔线向上调整。
+        NudgeSplitUp,
+        /// 分隔线向下调整。
+        NudgeSplitDown,
+        /// 分隔线回到均分。
+        ResetSplitRatio,
     ]
 );
 
-/// 工作区快捷键：标签页、分屏、窗格焦点与缩放。
+/// 拖动窗格标题的起始阈值（像素；指针精度）。
+const PANE_DRAG_THRESHOLD: f32 = 5.;
+/// 顶部布局热区的最大高度（rem）。
+const LAYOUT_HOT_ZONE_REMS: f32 = 9.;
+/// 热区占窗格区域高度的比例。
+const LAYOUT_HOT_ZONE_FRACTION: f32 = 0.25;
+/// 分隔线键盘调整的步长（设计稿：每次 5%）。
+const SPLIT_STEP: f32 = 0.05;
+
+/// 工作区快捷键：标签页、分屏、窗格焦点、缩放与布局。
 ///
 /// 终端持有键盘焦点时上下文为 "Terminal"；工作区动作绑定在更外层的
-/// "Workspace" 上。按键没有工作区绑定时照常写入终端（如 Alt+方向键）。
+/// "Workspace" 上。分隔线与布局面板各自持有焦点，方向键等按键只在其
+/// 焦点上下文中生效，不会抢走终端的输入。
 fn bind_workspace_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-shift-t", NewTab, Some("Workspace")),
@@ -66,6 +116,25 @@ fn bind_workspace_keys(cx: &mut App) {
         KeyBinding::new("alt-right", FocusPaneRight, Some("Workspace")),
         KeyBinding::new("alt-up", FocusPaneUp, Some("Workspace")),
         KeyBinding::new("alt-down", FocusPaneDown, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-left", SwapPaneLeft, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-right", SwapPaneRight, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-up", SwapPaneUp, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-down", SwapPaneDown, Some("Workspace")),
+        KeyBinding::new("alt-z", OpenLayout, Some("Workspace")),
+        KeyBinding::new("escape", CancelLayout, Some("Workspace")),
+        KeyBinding::new("left", PreviousLayout, Some("LayoutPanel")),
+        KeyBinding::new("up", PreviousLayout, Some("LayoutPanel")),
+        KeyBinding::new("right", NextLayout, Some("LayoutPanel")),
+        KeyBinding::new("down", NextLayout, Some("LayoutPanel")),
+        KeyBinding::new("home", FirstLayout, Some("LayoutPanel")),
+        KeyBinding::new("end", LastLayout, Some("LayoutPanel")),
+        KeyBinding::new("enter", ApplyLayout, Some("LayoutPanel")),
+        KeyBinding::new("escape", CancelLayout, Some("LayoutPanel")),
+        KeyBinding::new("left", NudgeSplitLeft, Some("SplitDivider")),
+        KeyBinding::new("right", NudgeSplitRight, Some("SplitDivider")),
+        KeyBinding::new("up", NudgeSplitUp, Some("SplitDivider")),
+        KeyBinding::new("down", NudgeSplitDown, Some("SplitDivider")),
+        KeyBinding::new("home", ResetSplitRatio, Some("SplitDivider")),
     ]);
 }
 
@@ -86,6 +155,65 @@ struct PaneEntry {
     _events: Subscription,
 }
 
+/// 布局面板状态；打开期间预览只渲染占位，不写入分屏树。
+struct LayoutPanel {
+    /// 键盘选中的方案。
+    selected: Option<usize>,
+    /// 指针悬停的方案；优先于键盘选择展示预览。
+    hovered: Option<usize>,
+    /// 由拖动标题打开时记录的来源窗格；方案主槽位放它。
+    drag_source: Option<PaneId>,
+}
+
+impl LayoutPanel {
+    /// 当前展示的方案：悬停优先，其次是键盘选择。
+    fn preview(&self) -> Option<usize> {
+        self.hovered.or(self.selected)
+    }
+}
+
+/// 布局面板的键盘移动到某个方案。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LayoutSelection {
+    /// 上一个。
+    Previous,
+    /// 下一个。
+    Next,
+    /// 第一个。
+    First,
+    /// 最后一个。
+    Last,
+}
+
+/// 窗格标题拖动状态。
+struct PaneDrag {
+    /// 被拖动的窗格。
+    pane: PaneId,
+    /// 按下时的指针位置；用于拖动阈值判断。
+    origin: Point<Pixels>,
+    /// 最近一次指针位置；用于拖动浮标。
+    position: Point<Pixels>,
+    /// 是否已越过拖动阈值。
+    moved: bool,
+    /// 指针悬停的交换目标。
+    swap_target: Option<PaneId>,
+    /// 指针是否位于顶部布局热区。
+    hot: bool,
+}
+
+/// 分隔线调整界限：由布局元素在点击时提供，拖动与键盘调整共用。
+#[derive(Clone, Copy)]
+pub(crate) struct SplitMetrics {
+    /// 分隔线方向。
+    pub axis: Axis,
+    /// 节点区域在分屏方向上的像素尺寸。
+    pub extent: f32,
+    /// 第一个子区域的最小尺寸（像素）。
+    pub min_first: f32,
+    /// 第二个子区域的最小尺寸（像素）。
+    pub min_second: f32,
+}
+
 /// 工作区外壳。
 pub struct WorkspaceView {
     theme_preference: ThemePreference,
@@ -99,6 +227,18 @@ pub struct WorkspaceView {
     tab_scroll: ScrollHandle,
     /// 分隔线拖动中的分屏节点。
     dragging_split: Option<SplitId>,
+    /// 分隔线焦点与键盘调整界限。
+    split_interaction: Option<(SplitId, SplitMetrics)>,
+    /// 分隔线焦点句柄；点击分隔线后方向键调整比例。
+    split_focus: FocusHandle,
+    /// 布局面板；`None` 表示关闭。
+    layout: Option<LayoutPanel>,
+    /// 指针是否位于布局面板上；拖动经过面板时不关闭它。
+    pointer_over_layout: bool,
+    /// 布局面板焦点句柄。
+    layout_focus: FocusHandle,
+    /// 窗格标题拖动状态。
+    pane_drag: Option<PaneDrag>,
     /// 用户已确认退出；窗口关闭回调据此放行。
     exit_confirmed: bool,
     /// 空工作区的焦点入口。
@@ -128,6 +268,12 @@ impl WorkspaceView {
             panes: HashMap::new(),
             tab_scroll: ScrollHandle::new(),
             dragging_split: None,
+            split_interaction: None,
+            split_focus: cx.focus_handle(),
+            layout: None,
+            layout_focus: cx.focus_handle(),
+            pointer_over_layout: false,
+            pane_drag: None,
             exit_confirmed: false,
             empty_focus: cx.focus_handle(),
             next_tab_id: 1,
@@ -276,9 +422,7 @@ impl WorkspaceView {
 
     /// 关闭标签页并释放它的全部会话；返回之后应聚焦的句柄。
     fn close_tab_now(&mut self, id: TabId, cx: &mut Context<Self>) -> Option<FocusHandle> {
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
-            return None;
-        };
+        let index = self.tabs.iter().position(|tab| tab.id == id)?;
         let tab = self.tabs.remove(index);
         if let Some(tree) = &tab.tree {
             for pane in tree.leaves() {
@@ -349,7 +493,7 @@ impl WorkspaceView {
             // 活动窗格不在树中（不应发生）：把整棵树与新窗格并排，避免丢窗格。
             let existing = tab.tree.take();
             tab.tree = Some(match existing {
-                Some(tree) => PaneTree::split(split, axis, tree, PaneTree::leaf(new_pane)),
+                Some(tree) => PaneTree::split(split, axis, 0.5, tree, PaneTree::leaf(new_pane)),
                 None => PaneTree::leaf(new_pane),
             });
         }
@@ -361,10 +505,12 @@ impl WorkspaceView {
 
     /// 点击窗格任何位置：设为活动窗格并聚焦它的终端。
     fn activate_pane(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.active_tab_entry_mut() {
-            if tab.tree.as_ref().is_some_and(|tree| tree.contains(pane)) {
-                tab.active = Some(pane);
-            }
+        // 焦点回到窗格：清除分隔线的键盘调整目标。
+        self.split_interaction = None;
+        if let Some(tab) = self.active_tab_entry_mut()
+            && tab.tree.as_ref().is_some_and(|tree| tree.contains(pane))
+        {
+            tab.active = Some(pane);
         }
         self.focus_pane(pane, window, cx);
         cx.notify();
@@ -494,11 +640,22 @@ impl WorkspaceView {
             .map(|entry| entry.view.read(cx).focus_handle())
     }
 
-    // ---- 分隔线拖动 ----
+    // ---- 分隔线 ----
 
-    /// 开始拖动分隔线。
-    pub(crate) fn begin_divider_drag(&mut self, split: SplitId, cx: &mut Context<Self>) {
+    /// 开始与分隔线交互：记录拖动状态与键盘调整界限。
+    ///
+    /// 界限取点击时布局元素的像素区域；键盘调整与拖动使用同一套
+    /// 最小尺寸约束。焦点移到分隔线区域，方向键调整只在此上下文中生效。
+    pub(crate) fn begin_split_interaction(
+        &mut self,
+        split: SplitId,
+        metrics: SplitMetrics,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.dragging_split = Some(split);
+        self.split_interaction = Some((split, metrics));
+        window.focus(&self.split_focus, cx);
         cx.notify();
     }
 
@@ -518,11 +675,411 @@ impl WorkspaceView {
         }
     }
 
-    /// 结束拖动。
+    /// 结束拖动；焦点与调整界限保留，键盘仍可继续调整。
     pub(crate) fn end_divider_drag(&mut self, cx: &mut Context<Self>) {
         if self.dragging_split.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// 清除分隔线调整目标（点击窗格或区域空白处）。
+    fn clear_split_interaction(&mut self, cx: &mut Context<Self>) {
+        if self.split_interaction.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// 键盘调整分隔线：方向键与分隔线方向一致时移动 5%，垂直方向忽略。
+    fn nudge_split(&mut self, direction: Direction, cx: &mut Context<Self>) {
+        let Some((id, metrics)) = self.split_interaction else {
+            return;
+        };
+        let step = match (metrics.axis, direction) {
+            (Axis::Horizontal, Direction::Left) | (Axis::Vertical, Direction::Up) => -SPLIT_STEP,
+            (Axis::Horizontal, Direction::Right) | (Axis::Vertical, Direction::Down) => SPLIT_STEP,
+            _ => return,
+        };
+        let Some(current) = self.split_ratio(id) else {
+            return;
+        };
+        self.apply_split_target(id, metrics, current + step, cx);
+    }
+
+    /// 分隔线回到均分（`Home`）。
+    fn reset_split(&mut self, cx: &mut Context<Self>) {
+        let Some((id, metrics)) = self.split_interaction else {
+            return;
+        };
+        self.apply_split_target(id, metrics, 0.5, cx);
+    }
+
+    /// 读取分屏节点的当前比例。
+    fn split_ratio(&self, split: SplitId) -> Option<f32> {
+        self.active_tab_entry()
+            .and_then(|tab| tab.tree.as_ref())
+            .and_then(|tree| tree.split_node(split))
+            .map(|(_, ratio)| ratio)
+    }
+
+    /// 在交互记录的界限内把比例调整到目标值。
+    fn apply_split_target(
+        &mut self,
+        split: SplitId,
+        metrics: SplitMetrics,
+        target: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let ratio = clamp_ratio(
+            target,
+            metrics.extent,
+            metrics.min_first,
+            metrics.min_second,
+        );
+        self.set_split_ratio(split, ratio, cx);
+    }
+
+    // ---- 布局面板 ----
+
+    /// 布局面板是否打开。
+    fn is_layout_open(&self) -> bool {
+        self.layout.is_some()
+    }
+
+    /// 打开 / 关闭布局面板（`Alt+Z`、工具栏按钮）。
+    fn toggle_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_layout_open() {
+            self.close_layout(window, cx);
+        } else {
+            self.open_layout(None, cx);
+            window.focus(&self.layout_focus, cx);
+        }
+    }
+
+    /// 打开布局面板；`drag_source` 记录拖动来源窗格，`select_first` 选中首个方案。
+    ///
+    /// 焦点由调用方设置：键盘打开时聚焦面板，指针拖动时保持原焦点。
+    fn open_layout(&mut self, drag_source: Option<PaneId>, cx: &mut Context<Self>) {
+        let has_tree = self
+            .active_tab_entry()
+            .is_some_and(|tab| tab.tree.is_some());
+        if !has_tree {
+            return;
+        }
+        match &mut self.layout {
+            Some(panel) => {
+                panel.drag_source = drag_source;
+            }
+            None => {
+                self.layout = Some(LayoutPanel {
+                    // 打开时选中第一个方案并立即预览；指针悬停会覆盖它。
+                    selected: Some(0),
+                    hovered: None,
+                    drag_source,
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    /// 关闭布局面板；面板持有焦点时把焦点还给活动窗格。
+    fn close_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layout.take().is_none() {
+            return;
+        }
+        if self.layout_focus.is_focused(window)
+            && let Some(pane) = self.active_tab_entry().and_then(|tab| tab.active)
+        {
+            self.focus_pane(pane, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// 结束拖动打开的面板；键盘或按钮打开的面板保持打开。
+    fn close_layout_from_drag(&mut self, cx: &mut Context<Self>) {
+        if self
+            .layout
+            .as_ref()
+            .is_some_and(|panel| panel.drag_source.is_some())
+        {
+            self.layout = None;
+            cx.notify();
+        }
+    }
+
+    /// 在方案列表中移动键盘选择，同时更新预览。
+    fn move_layout_selection(&mut self, target: LayoutSelection, cx: &mut Context<Self>) {
+        let count = self.layout_pane_count();
+        let Some(panel) = &mut self.layout else {
+            return;
+        };
+        if count == 0 {
+            return;
+        }
+        let last = templates_for(count).len().saturating_sub(1);
+        let next = match target {
+            LayoutSelection::Previous => panel.selected.map(|index| index.saturating_sub(1)),
+            LayoutSelection::Next => panel.selected.map(|index| (index + 1).min(last)),
+            LayoutSelection::First => Some(0),
+            LayoutSelection::Last => Some(last),
+        };
+        if panel.selected != next {
+            panel.selected = next;
+            cx.notify();
+        }
+    }
+
+    /// 指针悬停某个方案；`None` 清除悬停预览。
+    fn hover_layout_option(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.layout else {
+            return;
+        };
+        if panel.hovered != index {
+            panel.hovered = index;
+            cx.notify();
+        }
+    }
+
+    /// 记录指针是否位于布局面板上；拖动经过面板时不关闭面板。
+    fn set_layout_pointer(&mut self, over: bool, cx: &mut Context<Self>) {
+        if self.pointer_over_layout != over {
+            self.pointer_over_layout = over;
+            cx.notify();
+        }
+    }
+
+    /// 应用方案：主槽位是拖动来源或活动窗格，其余按原有顺序填入。
+    fn apply_layout(
+        &mut self,
+        index: usize,
+        source: Option<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((panes, active)) = self.ordered_panes(source) else {
+            return;
+        };
+        let templates = templates_for(panes.len());
+        let Some(template) = templates.get(index) else {
+            return;
+        };
+        let mut next = self.next_split_id;
+        let tree = template.build(&panes, &mut || {
+            let id = SplitId(next);
+            next += 1;
+            id
+        });
+        self.next_split_id = next;
+
+        let Some(tab_index) = self.active_tab_index() else {
+            return;
+        };
+        let tab = &mut self.tabs[tab_index];
+        tab.tree = Some(tree);
+        tab.active = Some(active);
+        tab.zoomed = None;
+        self.layout = None;
+        self.focus_pane(active, window, cx);
+        cx.notify();
+    }
+
+    /// 当前标签页的窗格顺序：主槽位在前（拖动来源或活动窗格），其余按树序。
+    fn ordered_panes(&self, source: Option<PaneId>) -> Option<(Vec<PaneId>, PaneId)> {
+        let tab = self.active_tab_entry()?;
+        let tree = tab.tree.as_ref()?;
+        let main = source.or(tab.active).filter(|pane| tree.contains(*pane))?;
+        let mut panes = vec![main];
+        panes.extend(tree.leaves().into_iter().filter(|pane| *pane != main));
+        Some((panes, main))
+    }
+
+    /// 布局方案的窗格数量；没有会话时为 0。
+    fn layout_pane_count(&self) -> usize {
+        self.active_tab_entry()
+            .and_then(|tab| tab.tree.as_ref())
+            .map(|tree| tree.leaves().len())
+            .unwrap_or(0)
+    }
+
+    /// 当前应该展示的预览布局；形状与现有布局一致时为 `None`。
+    fn preview_tree(&self) -> Option<(PaneTree, PaneId)> {
+        let panel = self.layout.as_ref()?;
+        let index = panel.preview()?;
+        let (panes, main) = self.ordered_panes(panel.drag_source)?;
+        let current = self.active_tab_entry()?.tree.as_ref()?;
+        let template = templates_for(panes.len()).get(index)?.clone();
+        let mut next = 0_u64;
+        let tree = template.build(&panes, &mut || {
+            let id = SplitId(next);
+            next += 1;
+            id
+        });
+        if tree.same_shape(current) {
+            return None;
+        }
+        Some((tree, main))
+    }
+
+    // ---- 窗格标题拖动 ----
+
+    /// 记录标题上的按下；越过阈值后才成为拖动。
+    fn begin_pane_press(&mut self, pane: PaneId, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.pane_drag = Some(PaneDrag {
+            pane,
+            origin: position,
+            position,
+            moved: false,
+            swap_target: None,
+            hot: false,
+        });
+        cx.notify();
+    }
+
+    /// 是否有待决或进行中的窗格拖动。
+    pub(crate) fn has_pane_drag(&self) -> bool {
+        self.pane_drag.is_some()
+    }
+
+    /// 拖动中更新指针位置：判定热区与交换目标。
+    ///
+    /// `area` 是窗格区域的像素边界，`hot_zone_max` 是热区的高度上限；
+    /// 分屏几何按比例换算到该区域。
+    pub(crate) fn update_pane_drag(
+        &mut self,
+        position: Point<Pixels>,
+        area: Bounds<Pixels>,
+        hot_zone_max: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((pane, moved)) = self.pane_drag.as_ref().map(|drag| {
+            (
+                drag.pane,
+                drag.moved
+                    || (position - drag.origin).magnitude() >= f64::from(PANE_DRAG_THRESHOLD),
+            )
+        }) else {
+            return;
+        };
+        if let Some(drag) = &mut self.pane_drag {
+            drag.position = position;
+            if !moved {
+                // 尚未越过阈值：只记录位置，不进入拖动状态。
+                return;
+            }
+            drag.moved = true;
+        }
+
+        let hot_zone =
+            (f32::from(area.size.height) * LAYOUT_HOT_ZONE_FRACTION).min(f32::from(hot_zone_max));
+        let inside = position.x >= area.origin.x
+            && position.x <= area.origin.x + area.size.width
+            && position.y >= area.origin.y
+            && position.y <= area.origin.y + area.size.height;
+        // 指针位于面板上时保持热区：面板底部可能超出热区高度。
+        let hot = self.pointer_over_layout
+            || (inside && f32::from(position.y - area.origin.y) < hot_zone);
+
+        let mut swap_target = None;
+        if inside
+            && !hot
+            && let Some(tree) = self.active_tab_entry().and_then(|tab| tab.tree.as_ref())
+        {
+            let geometry = tree.geometry();
+            for (candidate, rect) in &geometry.panes {
+                if *candidate == pane {
+                    continue;
+                }
+                let left = area.origin.x + area.size.width * rect.x;
+                let top = area.origin.y + area.size.height * rect.y;
+                let right = left + area.size.width * rect.width;
+                let bottom = top + area.size.height * rect.height;
+                if position.x >= left
+                    && position.x < right
+                    && position.y >= top
+                    && position.y < bottom
+                {
+                    swap_target = Some(*candidate);
+                    break;
+                }
+            }
+        }
+
+        if let Some(drag) = &mut self.pane_drag {
+            drag.hot = hot;
+            drag.swap_target = swap_target;
+        }
+        if hot {
+            self.open_layout(Some(pane), cx);
+        } else {
+            self.close_layout_from_drag(cx);
+        }
+        cx.notify();
+    }
+
+    /// 结束拖动：交换窗格、应用悬停的方案，或保持原样。
+    fn end_pane_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.pane_drag.take() else {
+            return;
+        };
+        if !drag.moved {
+            // 只是点击标题：仅更新活动窗格。
+            self.activate_pane(drag.pane, window, cx);
+            return;
+        }
+
+        if drag.hot {
+            // 释放在热区：悬停在方案卡片上时应用它；否则只关闭拖动打开的面板。
+            if let Some(index) = self.layout.as_ref().and_then(|panel| panel.hovered) {
+                self.apply_layout(index, Some(drag.pane), window, cx);
+                return;
+            }
+            self.close_layout_from_drag(cx);
+        } else if let Some(target) = drag.swap_target {
+            if let Some(tab) = self.active_tab_entry_mut()
+                && let Some(tree) = tab.tree.as_mut()
+                && tree.swap(drag.pane, target)
+            {
+                tab.active = Some(drag.pane);
+            }
+            self.close_layout_from_drag(cx);
+            self.focus_pane(drag.pane, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// 取消拖动：不改变布局，关闭由拖动打开的面板。
+    fn cancel_pane_drag(&mut self, cx: &mut Context<Self>) {
+        if let Some(drag) = self.pane_drag.take()
+            && drag.moved
+        {
+            self.close_layout_from_drag(cx);
+            cx.notify();
+        }
+    }
+
+    /// 键盘交换：与指定方向上最近的窗格交换位置（`Ctrl+Shift+方向键`）。
+    fn swap_direction(
+        &mut self,
+        direction: Direction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.active_tab_index() else {
+            return;
+        };
+        let tab = &mut self.tabs[index];
+        let (Some(tree), Some(active)) = (tab.tree.as_ref(), tab.active) else {
+            return;
+        };
+        let geometry = tree.geometry();
+        let Some(target) = nearest_in_direction(&geometry, active, direction) else {
+            return;
+        };
+        if let Some(tree) = tab.tree.as_mut() {
+            tree.swap(active, target);
+        }
+        // 焦点跟随窗格身份：交换后仍停留在原来的窗格会话上。
+        self.focus_pane(active, window, cx);
+        cx.notify();
     }
 
     // ---- 关闭确认 ----
@@ -645,6 +1202,7 @@ impl WorkspaceView {
                                 .ghost()
                                 .xsmall()
                                 .tooltip("关闭标签页")
+                                .accessibility_label("关闭标签页")
                                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                     this.close_tab(id, window, cx);
                                 })),
@@ -656,12 +1214,14 @@ impl WorkspaceView {
                     .icon(IconName::Plus)
                     .ghost()
                     .tooltip("新建标签页 · Ctrl+Shift+T")
+                    .accessibility_label("新建标签页")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_tab(window, cx);
                     })),
             )
             .child(div().flex_1())
             .child(self.render_split_button())
+            .child(self.render_layout_button(cx))
             .into_any_element()
     }
 
@@ -687,7 +1247,26 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// 当前标签页的窗格区域：正常分屏、放大单窗格或空状态。
+    /// 顶部的布局入口：打开排列窗格面板，打开期间保持按下态。
+    fn render_layout_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Toggle::new("layout-toggle")
+            .ghost()
+            .checked(self.is_layout_open())
+            .icon(Icon::new(IconName::LayoutTemplate))
+            .label("布局…")
+            .tooltip("排列窗格 · Alt+Z")
+            .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                if *checked {
+                    this.open_layout(None, cx);
+                    window.focus(&this.layout_focus, cx);
+                } else {
+                    this.close_layout(window, cx);
+                }
+            }))
+            .into_any_element()
+    }
+
+    /// 当前标签页的窗格区域：正常分屏、放大单窗格、布局预览或空状态。
     fn render_panes(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(tab) = self.active_tab_entry() else {
             return div().into_any_element();
@@ -695,6 +1274,11 @@ impl WorkspaceView {
         let Some(tree) = tab.tree.as_ref() else {
             return self.render_empty_tab(window, cx).into_any_element();
         };
+
+        // 布局预览：只渲染占位，不触碰终端视图与 PTY 尺寸。
+        if let Some((preview, main)) = self.preview_tree() {
+            return self.render_preview(&preview, main, cx);
+        }
 
         let active = tab.active;
         let mut panes = HashMap::new();
@@ -718,7 +1302,81 @@ impl WorkspaceView {
                 .remove(&zoomed)
                 .unwrap_or_else(|| div().into_any_element());
         }
-        crate::split_element::build(tree, &mut panes, cx.entity())
+        let dividers = !self.has_pane_drag();
+        let options = SplitLayoutOptions {
+            dividers,
+            focused_split: self.split_interaction.map(|(split, _)| split),
+        };
+        build_split_layout(tree, &mut panes, cx.entity(), &options)
+    }
+
+    /// 布局预览：维护窗格身份但只展示占位内容。
+    fn render_preview(&self, tree: &PaneTree, main: PaneId, cx: &mut Context<Self>) -> AnyElement {
+        let mut panes = HashMap::new();
+        for pane in tree.leaves() {
+            panes.insert(pane, self.render_preview_pane(pane, pane == main, cx));
+        }
+        let options = SplitLayoutOptions {
+            dividers: false,
+            focused_split: None,
+        };
+        build_split_layout(tree, &mut panes, cx.entity(), &options)
+    }
+
+    /// 预览中的窗格占位：保留标题，终端内容以占位块表示。
+    fn render_preview_pane(&self, pane: PaneId, main: bool, cx: &mut Context<Self>) -> AnyElement {
+        let title = self
+            .panes
+            .get(&pane)
+            .map(|entry| pane_heading(entry.view.read(cx)))
+            .unwrap_or_default();
+
+        v_flex()
+            .id(("pane-preview", pane.value()))
+            .test_support()
+            .size_full()
+            .overflow_hidden()
+            .bg(cx.theme().background)
+            .when(main, |this| {
+                this.border_1().border_color(cx.theme().primary)
+            })
+            .child(
+                h_flex()
+                    .h_8()
+                    .px_2()
+                    .gap_1()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .bg(if main {
+                        cx.theme().selection
+                    } else {
+                        cx.theme().title_bar
+                    })
+                    .child(Icon::new(IconName::SquareTerminal).size_3p5())
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(title)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .bg(cx.theme().muted)
+                    .child(
+                        Icon::new(IconName::LayoutTemplate)
+                            .size_5()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("布局预览"),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// 单个窗格：标题栏（身份与操作）与终端内容。
@@ -740,6 +1398,27 @@ impl WorkspaceView {
             )
         };
 
+        let dragging = self.pane_drag.as_ref().filter(|drag| drag.moved);
+        let swapped = dragging.is_some_and(|drag| drag.swap_target == Some(pane));
+        let lifted = dragging.is_some_and(|drag| drag.pane == pane);
+
+        // 标题拖动区：排除操作按钮，按下并越过阈值后才成为拖动。
+        let title_region = h_flex()
+            .id(("pane-drag", pane.value()))
+            .test_support()
+            .flex_1()
+            .min_w_0()
+            .gap_1()
+            .items_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.begin_pane_press(pane, event.position, cx);
+                }),
+            )
+            .child(Icon::new(IconName::SquareTerminal).size_3p5())
+            .child(div().flex_1().min_w_0().truncate().text_sm().child(title));
+
         let header = h_flex()
             .h_8()
             .px_2()
@@ -747,18 +1426,19 @@ impl WorkspaceView {
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
-            .bg(if active {
+            .bg(if swapped {
+                cx.theme().primary.alpha(0.12)
+            } else if active {
                 cx.theme().title_bar
             } else {
                 cx.theme().background
             })
-            .text_color(if active {
+            .text_color(if active || swapped {
                 cx.theme().foreground
             } else {
                 cx.theme().muted_foreground
             })
-            .child(Icon::new(IconName::SquareTerminal).size_3p5())
-            .child(div().flex_1().min_w_0().truncate().text_sm().child(title))
+            .child(title_region)
             .when(exited || failed, |this| {
                 this.child(
                     div()
@@ -777,6 +1457,7 @@ impl WorkspaceView {
                     .ghost()
                     .xsmall()
                     .tooltip("分屏…")
+                    .accessibility_label("分屏")
                     .dropdown_menu(|menu, _window, _cx| {
                         menu.item(
                             PopupMenuItem::new("向右分屏")
@@ -804,6 +1485,11 @@ impl WorkspaceView {
                     } else {
                         "聚焦窗格 · Ctrl+Shift+Enter"
                     })
+                    .accessibility_label(if zoomed {
+                        "恢复分屏"
+                    } else {
+                        "聚焦窗格"
+                    })
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.toggle_zoom_pane(pane, window, cx);
                     })),
@@ -815,6 +1501,7 @@ impl WorkspaceView {
                         .ghost()
                         .xsmall()
                         .tooltip("重新启动")
+                        .accessibility_label("重新启动")
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.restart_pane(pane, window, cx);
                         })),
@@ -826,6 +1513,7 @@ impl WorkspaceView {
                     .ghost()
                     .xsmall()
                     .tooltip("关闭窗格 · Ctrl+Shift+W")
+                    .accessibility_label("关闭窗格")
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.close_pane(pane, window, cx);
                     })),
@@ -837,6 +1525,11 @@ impl WorkspaceView {
                 .test_support()
                 .size_full()
                 .overflow_hidden()
+                .relative()
+                .when(lifted, |this| this.opacity(0.45))
+                .when(swapped, |this| {
+                    this.border_1().border_color(cx.theme().primary)
+                })
                 .bg(cx.theme().background)
                 .on_mouse_down(
                     MouseButton::Left,
@@ -844,8 +1537,36 @@ impl WorkspaceView {
                         this.activate_pane(pane, window, cx);
                     }),
                 )
+                .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _window, cx| {
+                    // 指针回到窗格上：清除方案卡片上的悬停预览。
+                    this.hover_layout_option(None, cx);
+                    this.set_layout_pointer(false, cx);
+                }))
                 .child(header)
                 .child(div().flex_1().min_h_0().child(view))
+                .when(swapped, |this| {
+                    this.child(
+                        v_flex()
+                            .absolute()
+                            .inset_0()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded(cx.theme().radius)
+                                    .border_1()
+                                    .border_color(cx.theme().primary)
+                                    .bg(cx.theme().popover)
+                                    .text_xs()
+                                    .text_color(cx.theme().primary)
+                                    .child(Icon::new(IconName::ArrowLeftRight).size_3p5())
+                                    .child("松手交换位置"),
+                            ),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -926,7 +1647,9 @@ impl WorkspaceView {
             .and_then(|tab| tab.tree.as_ref())
             .map(|tree| tree.leaves().len())
             .unwrap_or(0);
-        let count_text = if self.zoomed_pane().is_some() {
+        let count_text = if self.preview_tree().is_some() {
+            format!("{pane_count} 个窗格 · 预览中")
+        } else if self.zoomed_pane().is_some() {
             format!("{pane_count} 个窗格 · 已聚焦")
         } else {
             format!("{pane_count} 个窗格")
@@ -951,6 +1674,254 @@ impl WorkspaceView {
             .child(
                 ThemeCapsule::new(self.theme_preference).on_select(cx.listener(Self::select_theme)),
             )
+            .into_any_element()
+    }
+
+    // ---- 布局面板与拖动反馈 ----
+
+    /// 布局面板：顶部推荐方案的浮层；悬停或键盘选择时预览。
+    fn render_layout_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(panel) = &self.layout else {
+            return div().into_any_element();
+        };
+        let Some((panes, main)) = self.ordered_panes(panel.drag_source) else {
+            return div().into_any_element();
+        };
+        let templates = templates_for(panes.len());
+
+        let cards = templates
+            .iter()
+            .enumerate()
+            .map(|(index, template)| self.render_layout_card(index, template, &panes, main, cx))
+            .collect::<Vec<_>>();
+
+        let escape = Kbd::binding_for_action(&CancelLayout, Some("LayoutPanel"), window);
+        let enter = Kbd::binding_for_action(&ApplyLayout, Some("LayoutPanel"), window);
+
+        v_flex()
+            .id("layout-panel")
+            .test_support()
+            .track_focus(&self.layout_focus)
+            .key_context("LayoutPanel")
+            .on_action(cx.listener(Self::cancel_layout_action))
+            .on_action(cx.listener(Self::apply_layout_action))
+            .on_action(cx.listener(Self::previous_layout_action))
+            .on_action(cx.listener(Self::next_layout_action))
+            .on_action(cx.listener(Self::first_layout_action))
+            .on_action(cx.listener(Self::last_layout_action))
+            .absolute()
+            .top_3()
+            .right_3()
+            .occlude()
+            .popover_style(cx)
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _window, cx| {
+                this.set_layout_pointer(true, cx);
+            }))
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_3()
+                    .pb_2()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_sm().child("排列窗格"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{} 个窗格", panes.len())),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("layout-close")
+                            .icon(IconName::X)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("关闭 · Esc")
+                            .accessibility_label("关闭布局面板")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.close_layout(window, cx);
+                            })),
+                    ),
+            )
+            .child(h_flex().gap_2().px_3().pb_3().children(cards))
+            .child(
+                h_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .items_center()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child("悬停预览，点击应用")
+                    .child(div().flex_1())
+                    .when_some(enter, |this, kbd| this.child(kbd).child("应用"))
+                    .when_some(escape, |this, kbd| this.child(kbd).child("取消")),
+            )
+            .into_any_element()
+    }
+
+    /// 一个布局方案：缩略图、名称与预览 / 已应用状态。
+    fn render_layout_card(
+        &self,
+        index: usize,
+        template: &LayoutTemplate,
+        panes: &[PaneId],
+        main: PaneId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // 缩略图需要方案的几何；构建时使用局部身份，不占用真实身份。
+        let mut next = 0_u64;
+        let tree = template.build(panes, &mut || {
+            let id = SplitId(next);
+            next += 1;
+            id
+        });
+        let applied = self
+            .active_tab_entry()
+            .and_then(|tab| tab.tree.as_ref())
+            .is_some_and(|current| tree.same_shape(current));
+        let (previewed, selected) = self
+            .layout
+            .as_ref()
+            .map(|panel| {
+                (
+                    panel.preview() == Some(index),
+                    panel.selected == Some(index),
+                )
+            })
+            .unwrap_or((false, false));
+
+        let theme = cx.theme();
+        let cells = tree
+            .geometry()
+            .panes
+            .into_iter()
+            .map(|(pane, rect)| {
+                let primary = pane == main;
+                div()
+                    .absolute()
+                    .left(relative(rect.x))
+                    .top(relative(rect.y))
+                    .w(relative(rect.width))
+                    .h(relative(rect.height))
+                    .child(
+                        // 1px 缩略图内缝：保证相邻窗格之间有可见边界。
+                        div()
+                            .m(rems(0.0625))
+                            .w_full()
+                            .h_full()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if primary { theme.primary } else { theme.border })
+                            .bg(if primary {
+                                theme.selection
+                            } else {
+                                theme.muted
+                            }),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        let border = if previewed || selected {
+            theme.primary
+        } else {
+            theme.border
+        };
+        let background = if applied && !previewed {
+            theme.selection
+        } else {
+            theme.muted
+        };
+
+        Button::new(("layout-option", index))
+            .ghost()
+            .xsmall()
+            .w_20()
+            // 卡片高度取内容需要的最小固定值（缩略图 + 名称 + 内边距）。
+            .h_20()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .p_2()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(border)
+            .bg(background)
+            .accessibility_label(format!("应用{}布局", template.name()))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.apply_layout(index, None, window, cx);
+            }))
+            .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _window, cx| {
+                this.hover_layout_option(Some(index), cx);
+            }))
+            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                if !*hovered {
+                    this.hover_layout_option(None, cx);
+                }
+            }))
+            .child(div().relative().w_full().h_10().children(cells))
+            .child(div().text_xs().child(template.name().to_owned()))
+            .into_any_element()
+    }
+
+    /// 顶部布局热区提示：拖动标题且不在热区时显示。
+    fn render_drop_hint(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .absolute()
+            .top_2()
+            .left_0()
+            .right_0()
+            .justify_center()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_dashed()
+                    .border_color(cx.theme().primary)
+                    .bg(cx.theme().popover)
+                    .text_xs()
+                    .text_color(cx.theme().primary)
+                    .child(Icon::new(IconName::LayoutTemplate).size_3p5())
+                    .child("拖到这里，重新排列窗格"),
+            )
+            .into_any_element()
+    }
+
+    /// 拖动浮标：跟随指针的窗格标题。
+    fn render_drag_ghost(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(drag) = self.pane_drag.as_ref().filter(|drag| drag.moved) else {
+            return div().into_any_element();
+        };
+        let title = self
+            .panes
+            .get(&drag.pane)
+            .map(|entry| pane_heading(entry.view.read(cx)))
+            .unwrap_or_default();
+
+        h_flex()
+            .absolute()
+            .left(drag.position.x)
+            .top(drag.position.y)
+            .ml_3()
+            .mt_3()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().primary)
+            .bg(cx.theme().popover)
+            .text_xs()
+            .text_color(cx.theme().foreground)
+            .child(Icon::new(IconName::GripVertical).size_3p5())
+            .child(title)
             .into_any_element()
     }
 
@@ -1077,6 +2048,129 @@ impl WorkspaceView {
     ) {
         self.focus_direction(Direction::Down, window, cx);
     }
+
+    fn swap_left_action(&mut self, _: &SwapPaneLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.swap_direction(Direction::Left, window, cx);
+    }
+
+    fn swap_right_action(
+        &mut self,
+        _: &SwapPaneRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.swap_direction(Direction::Right, window, cx);
+    }
+
+    fn swap_up_action(&mut self, _: &SwapPaneUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.swap_direction(Direction::Up, window, cx);
+    }
+
+    fn swap_down_action(&mut self, _: &SwapPaneDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.swap_direction(Direction::Down, window, cx);
+    }
+
+    fn open_layout_action(&mut self, _: &OpenLayout, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_layout(window, cx);
+    }
+
+    fn apply_layout_action(
+        &mut self,
+        _: &ApplyLayout,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.layout.as_ref().and_then(|panel| panel.preview()) else {
+            cx.propagate();
+            return;
+        };
+        self.apply_layout(index, None, window, cx);
+    }
+
+    fn cancel_layout_action(
+        &mut self,
+        _: &CancelLayout,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane_drag.is_some() {
+            // 拖动中的指针取消：保持原布局。
+            self.cancel_pane_drag(cx);
+            return;
+        }
+        if self.layout.is_some() {
+            self.close_layout(window, cx);
+            return;
+        }
+        // 没有可取消的操作：让按键继续传递（如终端里的 Escape）。
+        cx.propagate();
+    }
+
+    fn previous_layout_action(
+        &mut self,
+        _: &PreviousLayout,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_layout_selection(LayoutSelection::Previous, cx);
+    }
+
+    fn next_layout_action(&mut self, _: &NextLayout, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_layout_selection(LayoutSelection::Next, cx);
+    }
+
+    fn first_layout_action(
+        &mut self,
+        _: &FirstLayout,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_layout_selection(LayoutSelection::First, cx);
+    }
+
+    fn last_layout_action(&mut self, _: &LastLayout, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_layout_selection(LayoutSelection::Last, cx);
+    }
+
+    fn nudge_left_action(
+        &mut self,
+        _: &NudgeSplitLeft,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.nudge_split(Direction::Left, cx);
+    }
+
+    fn nudge_right_action(
+        &mut self,
+        _: &NudgeSplitRight,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.nudge_split(Direction::Right, cx);
+    }
+
+    fn nudge_up_action(&mut self, _: &NudgeSplitUp, _window: &mut Window, cx: &mut Context<Self>) {
+        self.nudge_split(Direction::Up, cx);
+    }
+
+    fn nudge_down_action(
+        &mut self,
+        _: &NudgeSplitDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.nudge_split(Direction::Down, cx);
+    }
+
+    fn reset_split_action(
+        &mut self,
+        _: &ResetSplitRatio,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reset_split(cx);
+    }
 }
 
 /// 窗格的展示名称：会话标题优先，否则使用 shell 名称。
@@ -1097,6 +2191,12 @@ fn pane_heading(terminal: &TerminalView) -> String {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dragging = self.pane_drag.as_ref().is_some_and(|drag| drag.moved);
+        let hint = self
+            .pane_drag
+            .as_ref()
+            .is_some_and(|drag| drag.moved && !drag.hot && drag.swap_target.is_none());
+
         v_flex()
             .size_full()
             .key_context("Workspace")
@@ -1112,16 +2212,167 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::focus_right_action))
             .on_action(cx.listener(Self::focus_up_action))
             .on_action(cx.listener(Self::focus_down_action))
+            .on_action(cx.listener(Self::swap_left_action))
+            .on_action(cx.listener(Self::swap_right_action))
+            .on_action(cx.listener(Self::swap_up_action))
+            .on_action(cx.listener(Self::swap_down_action))
+            .on_action(cx.listener(Self::open_layout_action))
+            .on_action(cx.listener(Self::apply_layout_action))
+            .on_action(cx.listener(Self::cancel_layout_action))
+            .on_action(cx.listener(Self::previous_layout_action))
+            .on_action(cx.listener(Self::next_layout_action))
+            .on_action(cx.listener(Self::first_layout_action))
+            .on_action(cx.listener(Self::last_layout_action))
+            .on_action(cx.listener(Self::nudge_left_action))
+            .on_action(cx.listener(Self::nudge_right_action))
+            .on_action(cx.listener(Self::nudge_up_action))
+            .on_action(cx.listener(Self::nudge_down_action))
+            .on_action(cx.listener(Self::reset_split_action))
             .child(self.render_tab_bar(cx))
             .child(
+                // 分隔线焦点区域：只聚焦分隔线时（`SplitDivider` 上下文）
+                // 方向键调整生效；终端持有焦点时不受影响。
                 div()
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
                     .relative()
-                    .child(self.render_panes(window, cx)),
+                    .track_focus(&self.split_focus)
+                    .key_context(if self.split_focus.is_focused(window) {
+                        "SplitDivider"
+                    } else {
+                        "PaneArea"
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                            // 区域空白处的点击：清除分隔线调整目标。
+                            this.clear_split_interaction(cx);
+                        }),
+                    )
+                    .child(PaneDragLayer {
+                        workspace: cx.entity(),
+                    })
+                    .child(self.render_panes(window, cx))
+                    .when(hint, |this| this.child(self.render_drop_hint(cx)))
+                    .when(self.is_layout_open(), |this| {
+                        this.child(
+                            // 面板外的点击关闭面板：与浮层的关闭约定一致。
+                            div()
+                                .id("layout-backdrop")
+                                .absolute()
+                                .inset_0()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                        this.close_layout(window, cx);
+                                    }),
+                                )
+                                .on_mouse_move(cx.listener(
+                                    |this, _: &MouseMoveEvent, _window, cx| {
+                                        this.set_layout_pointer(false, cx);
+                                    },
+                                )),
+                        )
+                    })
+                    .child(self.render_layout_panel(window, cx)),
             )
             .child(self.render_status_bar(cx))
+            .when(dragging, |this| this.child(self.render_drag_ghost(cx)))
+    }
+}
+
+/// 窗格拖动层：覆盖窗格区域，跟踪拖动中的指针。
+///
+/// 指针位置要结合窗格区域的实际像素边界与分屏几何才能确定交换目标，
+/// 因此在 prepaint 拿到边界后注册窗口级监听；监听不改变布局，
+/// 只把指针状态上报工作区。
+struct PaneDragLayer {
+    workspace: Entity<WorkspaceView>,
+}
+
+impl Element for PaneDragLayer {
+    type RequestLayoutState = ();
+    type PrepaintState = Bounds<Pixels>;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::from("pane-drag-layer"))
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        // 监听层不参与布局：绝对定位铺满窗格区域，不挤压分屏元素。
+        let style = Style {
+            position: Position::Absolute,
+            inset: Edges {
+                top: Length::Definite(relative(0.0)),
+                right: Length::Definite(relative(0.0)),
+                bottom: Length::Definite(relative(0.0)),
+                left: Length::Definite(relative(0.0)),
+            },
+            ..Style::default()
+        };
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+        bounds
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _layout: &mut Self::RequestLayoutState,
+        area: &mut Self::PrepaintState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        let area = *area;
+        let hot_zone_max = rems(LAYOUT_HOT_ZONE_REMS).to_pixels(window.rem_size());
+        let workspace = self.workspace.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, _phase, _window, cx| {
+            if workspace.read(cx).has_pane_drag() {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.update_pane_drag(event.position, area, hot_zone_max, cx);
+                });
+            }
+        });
+
+        let workspace = self.workspace.clone();
+        window.on_mouse_event(move |_event: &MouseUpEvent, _phase, window, cx| {
+            if workspace.read(cx).has_pane_drag() {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.end_pane_drag(window, cx);
+                });
+            }
+        });
+    }
+}
+
+impl IntoElement for PaneDragLayer {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
     }
 }
 

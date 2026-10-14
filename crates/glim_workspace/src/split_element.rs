@@ -4,6 +4,10 @@
 //! `prepaint` 用实际像素区域计算两个子区域并布局、放置，`paint` 绘制
 //! 子元素与分隔线，并注册分隔线的拖动监听。元素不持有业务状态：
 //! 拖动只把新比例写回工作区，取消或提交都不重建会话。
+//!
+//! 分隔线可以持有键盘焦点：点击后方向键调整比例，`Home` 回到均分。
+//! 布局预览用同一元素摆放占位窗格，但不绘制分隔线，也不注册鼠标与
+//! 焦点行为。
 
 use std::collections::HashMap;
 
@@ -11,18 +15,27 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
 use crate::pane_tree::{Axis, PaneId, PaneTree, SplitId, clamp_ratio};
-use crate::workspace_view::WorkspaceView;
+use crate::workspace_view::{SplitMetrics, WorkspaceView};
 
 /// 分隔线的命中宽度（像素；拖动操作的物理界限）。
 const DIVIDER_HIT_WIDTH: f32 = 7.;
 /// 分隔线的可见宽度（像素；单条边界线）。
 const DIVIDER_LINE_WIDTH: f32 = 1.;
 
+/// 分屏布局选项。
+pub(crate) struct SplitLayoutOptions {
+    /// 分隔线是否可交互；预览与拖动中只摆放窗格。
+    pub dividers: bool,
+    /// 当前聚焦的分隔线。
+    pub focused_split: Option<SplitId>,
+}
+
 /// 构建分屏布局元素；`panes` 中列出的窗格元素会被消耗。
 pub(crate) fn build(
     tree: &PaneTree,
     panes: &mut HashMap<PaneId, AnyElement>,
     workspace: Entity<WorkspaceView>,
+    options: &SplitLayoutOptions,
 ) -> AnyElement {
     match tree {
         PaneTree::Leaf(pane) => panes
@@ -37,8 +50,8 @@ pub(crate) fn build(
         } => {
             let min_first = first.min_extent(*axis);
             let min_second = second.min_extent(*axis);
-            let first = build(first, panes, workspace.clone());
-            let second = build(second, panes, workspace.clone());
+            let first = build(first, panes, workspace.clone(), options);
+            let second = build(second, panes, workspace.clone(), options);
             SplitElement {
                 id: *id,
                 axis: *axis,
@@ -48,6 +61,8 @@ pub(crate) fn build(
                 first,
                 second,
                 workspace,
+                dividers: options.dividers,
+                focused: options.focused_split == Some(*id),
             }
             .into_any_element()
         }
@@ -66,65 +81,65 @@ struct SplitElement {
     first: AnyElement,
     second: AnyElement,
     workspace: Entity<WorkspaceView>,
+    /// 是否绘制并响应分隔线。
+    dividers: bool,
+    /// 分隔线是否持有键盘焦点。
+    focused: bool,
 }
 
 /// 布局结果：分隔线的命中区域与节点区域（拖动换算用）。
-struct SplitLayout {
+struct SplitElementLayout {
     bounds: Bounds<Pixels>,
     divider_bounds: Bounds<Pixels>,
     hitbox: Hitbox,
 }
 
+/// 两个子区域与分隔线的像素位置。
+struct Placement {
+    first_origin: Point<Pixels>,
+    first_size: Size<Pixels>,
+    second_origin: Point<Pixels>,
+    second_size: Size<Pixels>,
+    divider_bounds: Bounds<Pixels>,
+}
+
 impl SplitElement {
     /// 计算两个子区域与分隔线的像素位置。
-    fn place(
-        &self,
-        bounds: Bounds<Pixels>,
-    ) -> (
-        Point<Pixels>,
-        Size<Pixels>,
-        Point<Pixels>,
-        Size<Pixels>,
-        Bounds<Pixels>,
-    ) {
+    fn place(&self, bounds: Bounds<Pixels>) -> Placement {
         match self.axis {
             Axis::Horizontal => {
                 let first_width = (bounds.size.width * self.ratio).round();
                 let second_width = bounds.size.width - first_width;
-                let divider_origin = point(
-                    bounds.origin.x + first_width - px(DIVIDER_HIT_WIDTH / 2.),
-                    bounds.origin.y,
-                );
-                let divider_bounds = Bounds {
-                    origin: divider_origin,
-                    size: size(px(DIVIDER_HIT_WIDTH), bounds.size.height),
-                };
-                (
-                    bounds.origin,
-                    size(first_width, bounds.size.height),
-                    point(bounds.origin.x + first_width, bounds.origin.y),
-                    size(second_width, bounds.size.height),
-                    divider_bounds,
-                )
+                Placement {
+                    first_origin: bounds.origin,
+                    first_size: size(first_width, bounds.size.height),
+                    second_origin: point(bounds.origin.x + first_width, bounds.origin.y),
+                    second_size: size(second_width, bounds.size.height),
+                    divider_bounds: Bounds {
+                        origin: point(
+                            bounds.origin.x + first_width - px(DIVIDER_HIT_WIDTH / 2.),
+                            bounds.origin.y,
+                        ),
+                        size: size(px(DIVIDER_HIT_WIDTH), bounds.size.height),
+                    },
+                }
             }
             Axis::Vertical => {
                 let first_height = (bounds.size.height * self.ratio).round();
                 let second_height = bounds.size.height - first_height;
-                let divider_origin = point(
-                    bounds.origin.x,
-                    bounds.origin.y + first_height - px(DIVIDER_HIT_WIDTH / 2.),
-                );
-                let divider_bounds = Bounds {
-                    origin: divider_origin,
-                    size: size(bounds.size.width, px(DIVIDER_HIT_WIDTH)),
-                };
-                (
-                    bounds.origin,
-                    size(bounds.size.width, first_height),
-                    point(bounds.origin.x, bounds.origin.y + first_height),
-                    size(bounds.size.width, second_height),
-                    divider_bounds,
-                )
+                Placement {
+                    first_origin: bounds.origin,
+                    first_size: size(bounds.size.width, first_height),
+                    second_origin: point(bounds.origin.x, bounds.origin.y + first_height),
+                    second_size: size(bounds.size.width, second_height),
+                    divider_bounds: Bounds {
+                        origin: point(
+                            bounds.origin.x,
+                            bounds.origin.y + first_height - px(DIVIDER_HIT_WIDTH / 2.),
+                        ),
+                        size: size(bounds.size.width, px(DIVIDER_HIT_WIDTH)),
+                    },
+                }
             }
         }
     }
@@ -132,7 +147,7 @@ impl SplitElement {
 
 impl Element for SplitElement {
     type RequestLayoutState = ();
-    type PrepaintState = SplitLayout;
+    type PrepaintState = SplitElementLayout;
 
     fn id(&self) -> Option<ElementId> {
         Some(ElementId::from(("split", self.id.value())))
@@ -168,17 +183,18 @@ impl Element for SplitElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let (first_origin, first_size, second_origin, second_size, divider_bounds) =
-            self.place(bounds);
-        self.first.layout_as_root(first_size.into(), window, cx);
-        self.first.prepaint_at(first_origin, window, cx);
-        self.second.layout_as_root(second_size.into(), window, cx);
-        self.second.prepaint_at(second_origin, window, cx);
+        let placement = self.place(bounds);
+        self.first
+            .layout_as_root(placement.first_size.into(), window, cx);
+        self.first.prepaint_at(placement.first_origin, window, cx);
+        self.second
+            .layout_as_root(placement.second_size.into(), window, cx);
+        self.second.prepaint_at(placement.second_origin, window, cx);
 
-        let hitbox = window.insert_hitbox(divider_bounds, HitboxBehavior::Normal);
-        SplitLayout {
+        let hitbox = window.insert_hitbox(placement.divider_bounds, HitboxBehavior::Normal);
+        SplitElementLayout {
             bounds,
-            divider_bounds,
+            divider_bounds: placement.divider_bounds,
             hitbox,
         }
     }
@@ -196,6 +212,10 @@ impl Element for SplitElement {
         self.first.paint(window, cx);
         self.second.paint(window, cx);
 
+        if !self.dividers {
+            return;
+        }
+
         let dragging = self.workspace.read(cx).is_dragging_split(self.id);
         window.set_cursor_style(
             match self.axis {
@@ -205,7 +225,7 @@ impl Element for SplitElement {
             &layout.hitbox,
         );
 
-        // 可见线居中于命中区域；拖动中显示强调色。
+        // 可见线居中于命中区域；拖动中或聚焦时显示强调色。
         let line = match self.axis {
             Axis::Horizontal => Bounds {
                 origin: point(
@@ -226,7 +246,7 @@ impl Element for SplitElement {
         };
         window.paint_quad(fill(
             line,
-            if dragging {
+            if dragging || self.focused {
                 cx.theme().primary
             } else {
                 cx.theme().border
@@ -234,9 +254,13 @@ impl Element for SplitElement {
         ));
 
         let divider_bounds = layout.divider_bounds;
+        let node_bounds = layout.bounds;
         let hitbox = layout.hitbox.clone();
         let workspace = self.workspace.clone();
         let id = self.id;
+        let axis = self.axis;
+        let min_first_rem = self.min_first;
+        let min_second_rem = self.min_second;
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble
                 || event.button != MouseButton::Left
@@ -245,12 +269,31 @@ impl Element for SplitElement {
                 return;
             }
             window.capture_pointer(hitbox.id);
-            workspace.update(cx, |workspace, cx| workspace.begin_divider_drag(id, cx));
+            // 键盘调整使用与拖动一致的界限：节点区域与两侧最小尺寸。
+            let rem = f32::from(window.rem_size());
+            let extent = match axis {
+                Axis::Horizontal => f32::from(node_bounds.size.width),
+                Axis::Vertical => f32::from(node_bounds.size.height),
+            }
+            .max(1.);
+            let min_first = min_first_rem * rem;
+            let min_second = min_second_rem * rem;
+            workspace.update(cx, |workspace, cx| {
+                workspace.begin_split_interaction(
+                    id,
+                    SplitMetrics {
+                        axis,
+                        extent,
+                        min_first,
+                        min_second,
+                    },
+                    window,
+                    cx,
+                );
+            });
             cx.stop_propagation();
         });
 
-        let axis = self.axis;
-        let bounds = layout.bounds;
         let min_first = self.min_first * f32::from(window.rem_size());
         let min_second = self.min_second * f32::from(window.rem_size());
         let workspace = self.workspace.clone();
@@ -259,8 +302,14 @@ impl Element for SplitElement {
                 return;
             }
             let (extent, position) = match axis {
-                Axis::Horizontal => (bounds.size.width, event.position.x - bounds.origin.x),
-                Axis::Vertical => (bounds.size.height, event.position.y - bounds.origin.y),
+                Axis::Horizontal => (
+                    node_bounds.size.width,
+                    event.position.x - node_bounds.origin.x,
+                ),
+                Axis::Vertical => (
+                    node_bounds.size.height,
+                    event.position.y - node_bounds.origin.y,
+                ),
             };
             let extent = f32::from(extent).max(1.);
             let ratio = clamp_ratio(f32::from(position) / extent, extent, min_first, min_second);

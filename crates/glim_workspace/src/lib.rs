@@ -4,6 +4,7 @@
 //! 布局操作与关闭流程见 [`WorkspaceView`]；分屏结构是可单独测试的
 //! 纯逻辑（`pane_tree`），像素布局由 `split_element` 完成。
 
+mod layout;
 mod pane_tree;
 mod split_element;
 mod workspace_view;

@@ -17,6 +17,19 @@ use gpui_kit::{
 use super::WorkspaceView;
 use crate::pane_tree::{Axis, PaneId, PaneTree, TabId};
 
+/// 当前分屏的根节点方向与比例。
+fn root_split(workspace: &Entity<WorkspaceView>, cx: &App) -> (Axis, f32) {
+    match active_tree(workspace, cx) {
+        PaneTree::Split { axis, ratio, .. } => (axis, ratio),
+        PaneTree::Leaf(_) => panic!("根节点应为分屏"),
+    }
+}
+
+/// 活动会话的实体身份；用于断言布局操作不重建会话。
+fn session_id(workspace: &Entity<WorkspaceView>, pane: PaneId, cx: &App) -> gpui_kit::EntityId {
+    pane_session(workspace, pane, cx).entity_id()
+}
+
 /// 打开测试窗口：安装组件与产品主题，启动一个真实终端。
 ///
 /// 会话是真实 PTY：输出在后台线程产生，允许调度器进行非确定性等待。
@@ -48,6 +61,12 @@ fn find(window: &Window, id: impl Into<gpui_kit::ElementId>) -> ElementSnapshot 
             observation::registered_paths(window)
         )
     })
+}
+
+/// 元素是否存在于当前帧且可见；用于断言面板与预览的开关。
+fn is_visible(window: &Window, id: impl Into<gpui_kit::ElementId>) -> bool {
+    let id = id.into();
+    observation::find(window, &[], &id).is_some_and(|snapshot| snapshot.visible())
 }
 
 fn move_pointer(
@@ -507,9 +526,9 @@ fn closing_a_busy_pane_asks_for_confirmation(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn exiting_with_a_running_task_asks_for_confirmation(cx: &mut TestAppContext) {
     let (handle, workspace) = open_workspace(cx);
-    let mut visual = VisualTestContext::from_window(handle, cx).into_mut();
+    let visual = VisualTestContext::from_window(handle, cx).into_mut();
 
-    visual.update(|window, cx| render_frame(window, cx));
+    visual.update(render_frame);
     wait_until_idle(cx, &workspace);
     assert!(visual.simulate_close(), "空闲时窗口可以直接关闭");
 
@@ -545,4 +564,266 @@ fn exiting_with_a_running_task_asks_for_confirmation(cx: &mut TestAppContext) {
     visual.update(|window, cx| press(window, "escape", cx));
     assert!(!visual.simulate_close(), "取消后仍然需要确认");
     visual.update(|window, cx| press(window, "enter", cx));
+}
+
+// ---- 阶段 4：布局面板、拖拽交换与分隔线键盘调整 ----
+
+/// 布局面板：`Alt+Z` 打开、方向键预览、`Enter` 应用；预览不修改分屏树。
+#[gpui_kit::test]
+fn layout_panel_previews_and_applies_a_preset(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        press(window, "ctrl-shift-d", cx);
+        let (first, second) = {
+            let leaves = active_tree(&workspace, cx).leaves();
+            (leaves[0], leaves[1])
+        };
+        let first_session = session_id(&workspace, first, cx);
+        let second_session = session_id(&workspace, second, cx);
+        let tree_before = active_tree(&workspace, cx);
+
+        // 打开面板：第一个方案与当前布局形状一致，仍显示真实窗格。
+        press(window, "alt-z", cx);
+        assert!(is_visible(window, "layout-panel"), "布局面板应打开");
+        assert!(
+            is_visible(window, ("pane", first.value())),
+            "同形状时不预览"
+        );
+        assert_eq!(active_tree(&workspace, cx), tree_before, "预览不修改分屏树");
+
+        // 方向键切到“上下”：工作区显示占位窗格，真实窗格不再渲染。
+        press(window, "right", cx);
+        assert!(
+            is_visible(window, ("pane-preview", first.value())),
+            "预览应显示占位窗格"
+        );
+        assert!(
+            !is_visible(window, ("pane", first.value())),
+            "预览不渲染真实窗格"
+        );
+        assert_eq!(active_tree(&workspace, cx), tree_before, "预览不修改分屏树");
+        assert_eq!(session_id(&workspace, first, cx), first_session);
+
+        // Enter 应用：布局变为上下，会话身份保持，面板关闭。
+        press(window, "enter", cx);
+        assert!(!is_visible(window, "layout-panel"), "应用后关闭面板");
+        assert_eq!(root_split(&workspace, cx).0, Axis::Vertical, "应用上下布局");
+        // 主槽位是活动窗格：它在上方，另一个窗格在下方。
+        assert_eq!(active_tree(&workspace, cx).leaves(), vec![second, first]);
+        assert_eq!(session_id(&workspace, first, cx), first_session);
+        assert_eq!(session_id(&workspace, second, cx), second_session);
+    })
+    .expect("window stays open");
+}
+
+/// 悬停方案预览不重建会话；`Esc` 取消并恢复焦点。
+#[gpui_kit::test]
+fn hovering_a_layout_option_previews_until_cancelled(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        press(window, "ctrl-shift-d", cx);
+        let leaves = active_tree(&workspace, cx).leaves();
+        let (first, second) = (leaves[0], leaves[1]);
+        let tree_before = active_tree(&workspace, cx);
+        let second_session = session_id(&workspace, second, cx);
+
+        press(window, "alt-z", cx);
+        let option = find(window, ("layout-option", 1_usize)).bounds().center();
+        move_pointer(window, option, None, cx);
+
+        assert!(
+            is_visible(window, ("pane-preview", first.value())),
+            "悬停方案应显示预览"
+        );
+        assert_eq!(active_tree(&workspace, cx), tree_before, "预览不修改分屏树");
+        assert_eq!(session_id(&workspace, second, cx), second_session);
+
+        // Esc 取消：面板关闭、真实窗格恢复、焦点回到活动终端。
+        press(window, "escape", cx);
+        assert!(!is_visible(window, "layout-panel"), "Esc 关闭面板");
+        assert!(
+            is_visible(window, ("pane", first.value())),
+            "取消后恢复真实布局"
+        );
+        assert_eq!(active_tree(&workspace, cx), tree_before, "取消不修改分屏树");
+        let active = active_pane(&workspace, cx);
+        assert!(
+            pane_session(&workspace, active, cx)
+                .read(cx)
+                .focus_handle()
+                .is_focused(window),
+            "取消后焦点回到活动终端"
+        );
+    })
+    .expect("window stays open");
+}
+
+/// 拖拽标题到另一个窗格：交换位置，会话与输出保持。
+#[gpui_kit::test]
+fn dragging_a_pane_title_onto_another_swaps_positions(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| render_frame(window, cx))
+        .expect("window stays open");
+    wait_until_idle(cx, &workspace);
+
+    cx.update_window(handle, |_, window, cx| {
+        press(window, "ctrl-shift-d", cx);
+        let (first, second) = {
+            let leaves = active_tree(&workspace, cx).leaves();
+            (leaves[0], leaves[1])
+        };
+        let first_session = session_id(&workspace, first, cx);
+        let second_session = session_id(&workspace, second, cx);
+
+        let from = find(window, ("pane-drag", first.value())).bounds().center();
+        let to = find(window, ("pane", second.value())).bounds().center();
+        drag(window, from, to, cx);
+
+        let tree = active_tree(&workspace, cx);
+        assert_eq!(tree.leaves(), vec![second, first], "拖动后交换位置");
+        assert_eq!(active_pane(&workspace, cx), first, "拖动窗格成为活动窗格");
+        assert_eq!(session_id(&workspace, first, cx), first_session);
+        assert_eq!(session_id(&workspace, second, cx), second_session);
+        assert!(!is_visible(window, "layout-panel"), "交换不打开布局面板");
+    })
+    .expect("window stays open");
+}
+
+/// 拖拽标题到顶部热区：打开布局面板，释放在方案上应用它。
+#[gpui_kit::test]
+fn dragging_a_pane_title_to_the_top_applies_a_preset(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| render_frame(window, cx))
+        .expect("window stays open");
+    wait_until_idle(cx, &workspace);
+
+    cx.update_window(handle, |_, window, cx| {
+        press(window, "ctrl-shift-d", cx);
+        let (first, second) = {
+            let leaves = active_tree(&workspace, cx).leaves();
+            (leaves[0], leaves[1])
+        };
+        let first_session = session_id(&workspace, first, cx);
+        let second_session = session_id(&workspace, second, cx);
+
+        // 从拖动窗格（second）的标题拖到窗格区域顶部。
+        let header = find(window, ("pane-drag", second.value()))
+            .bounds()
+            .center();
+        let area_top = find(window, ("pane", second.value())).bounds().top();
+        move_pointer(window, header, None, cx);
+        mouse_button(window, header, MouseButton::Left, true, cx);
+        move_pointer(
+            window,
+            point(header.x, area_top + px(10.)),
+            Some(MouseButton::Left),
+            cx,
+        );
+        assert!(is_visible(window, "layout-panel"), "拖到热区应打开布局面板");
+
+        // 移到“上下”方案（下标 1）并松手。
+        let option = find(window, ("layout-option", 1_usize)).bounds().center();
+        move_pointer(window, option, Some(MouseButton::Left), cx);
+        mouse_button(window, option, MouseButton::Left, false, cx);
+
+        assert!(!is_visible(window, "layout-panel"), "应用后关闭面板");
+        assert_eq!(root_split(&workspace, cx).0, Axis::Vertical, "应用上下布局");
+        // 主槽位是拖动窗格：它在上方，另一个窗格在下方。
+        assert_eq!(active_tree(&workspace, cx).leaves(), vec![second, first]);
+        assert_eq!(session_id(&workspace, first, cx), first_session);
+        assert_eq!(session_id(&workspace, second, cx), second_session);
+    })
+    .expect("window stays open");
+}
+
+/// 聚焦分隔线后用方向键调整比例，`Home` 回到均分；会话保持。
+#[gpui_kit::test]
+fn keyboard_adjusts_the_focused_divider(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        press(window, "ctrl-shift-d", cx);
+        let first = active_tree(&workspace, cx).leaves()[0];
+        let first_session = session_id(&workspace, first, cx);
+
+        // 点击分隔线聚焦（点击位置即两个窗格的边界）。
+        let bounds = find(window, ("pane", first.value())).bounds();
+        let divider = point(bounds.right(), bounds.center().y);
+        move_pointer(window, divider, None, cx);
+        mouse_button(window, divider, MouseButton::Left, true, cx);
+        mouse_button(window, divider, MouseButton::Left, false, cx);
+        assert!(
+            workspace.read(cx).split_interaction.is_some(),
+            "点击分隔线应记录交互"
+        );
+        assert!(
+            workspace.read(cx).split_focus.is_focused(window),
+            "点击分隔线应聚焦分隔线"
+        );
+        assert!(
+            (root_split(&workspace, cx).1 - 0.5).abs() < 1e-3,
+            "均分起点"
+        );
+
+        // 方向键：左右调整 5%，垂直方向忽略。
+        press(window, "left", cx);
+        let ratio = root_split(&workspace, cx).1;
+        assert!((ratio - 0.45).abs() < 1e-3, "向左调整 5%: {ratio}");
+        press(window, "down", cx);
+        assert!(
+            (root_split(&workspace, cx).1 - ratio).abs() < 1e-3,
+            "垂直方向不调整水平分隔线"
+        );
+        press(window, "right", cx);
+        assert!(
+            (root_split(&workspace, cx).1 - 0.5).abs() < 1e-3,
+            "向右调整回均分"
+        );
+
+        // Home 回到均分。
+        press(window, "left", cx);
+        press(window, "home", cx);
+        assert!(
+            (root_split(&workspace, cx).1 - 0.5).abs() < 1e-3,
+            "Home 均分"
+        );
+        assert_eq!(session_id(&workspace, first, cx), first_session);
+    })
+    .expect("window stays open");
+}
+
+/// `Ctrl+Shift+方向键` 交换窗格位置；焦点跟随窗格身份。
+#[gpui_kit::test]
+fn keyboard_swaps_panes_in_direction(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        press(window, "ctrl-shift-d", cx);
+        let (first, second) = {
+            let leaves = active_tree(&workspace, cx).leaves();
+            (leaves[0], leaves[1])
+        };
+        let first_session = session_id(&workspace, first, cx);
+        let second_session = session_id(&workspace, second, cx);
+        assert_eq!(active_pane(&workspace, cx), second);
+
+        // 与左侧窗格交换：second 移到左侧。
+        press(window, "ctrl-shift-left", cx);
+        assert_eq!(active_tree(&workspace, cx).leaves(), vec![second, first]);
+        assert_eq!(active_pane(&workspace, cx), second, "焦点跟随窗格");
+        let geometry = active_tree(&workspace, cx).geometry();
+        assert!(
+            (geometry.pane_rect(second).expect("second pane").x).abs() < 1e-3,
+            "second 移动到左侧"
+        );
+
+        // 与右侧窗格交换：回到原位。
+        press(window, "ctrl-shift-right", cx);
+        assert_eq!(active_tree(&workspace, cx).leaves(), vec![first, second]);
+        assert_eq!(session_id(&workspace, first, cx), first_session);
+        assert_eq!(session_id(&workspace, second, cx), second_session);
+    })
+    .expect("window stays open");
 }

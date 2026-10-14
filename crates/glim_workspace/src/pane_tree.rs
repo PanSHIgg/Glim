@@ -140,12 +140,12 @@ impl PaneTree {
         Self::Leaf(pane)
     }
 
-    /// 创建均分的两路分屏。
-    pub fn split(id: SplitId, axis: Axis, first: Self, second: Self) -> Self {
+    /// 创建两路分屏；`ratio` 是第一个子区域占用的比例。
+    pub fn split(id: SplitId, axis: Axis, ratio: f32, first: Self, second: Self) -> Self {
         Self::Split {
             id,
             axis,
-            ratio: 0.5,
+            ratio,
             first: Box::new(first),
             second: Box::new(second),
         }
@@ -289,6 +289,86 @@ impl PaneTree {
         }
     }
 
+    /// 指定分屏节点的方向与当前比例；节点不存在时为 `None`。
+    pub fn split_node(&self, id: SplitId) -> Option<(Axis, f32)> {
+        match self {
+            Self::Leaf(_) => None,
+            Self::Split {
+                id: node_id,
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                if *node_id == id {
+                    Some((*axis, *ratio))
+                } else {
+                    first.split_node(id).or_else(|| second.split_node(id))
+                }
+            }
+        }
+    }
+
+    /// 交换两个窗格的位置，保持树的形状；任一窗格不属于本树时返回 `false`。
+    ///
+    /// 交换只改变窗格在布局中的位置：会话、输出与选择都随窗格身份保留。
+    pub fn swap(&mut self, first: PaneId, second: PaneId) -> bool {
+        if !self.contains(first) || !self.contains(second) {
+            return false;
+        }
+        self.swap_inner(first, second);
+        true
+    }
+
+    fn swap_inner(&mut self, first: PaneId, second: PaneId) {
+        match self {
+            Self::Leaf(pane) => {
+                if *pane == first {
+                    *pane = second;
+                } else if *pane == second {
+                    *pane = first;
+                }
+            }
+            Self::Split {
+                first: first_tree,
+                second: second_tree,
+                ..
+            } => {
+                first_tree.swap_inner(first, second);
+                second_tree.swap_inner(first, second);
+            }
+        }
+    }
+
+    /// 只比较形状（方向与比例，忽略身份）；布局是否需要重排用它判断。
+    pub fn same_shape(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Leaf(_), Self::Leaf(_)) => true,
+            (
+                Self::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                    ..
+                },
+                Self::Split {
+                    axis: other_axis,
+                    ratio: other_ratio,
+                    first: other_first,
+                    second: other_second,
+                    ..
+                },
+            ) => {
+                axis == other_axis
+                    && (ratio - other_ratio).abs() < 1e-3
+                    && first.same_shape(other_first)
+                    && second.same_shape(other_second)
+            }
+            _ => false,
+        }
+    }
+
     /// 计算所有窗格与分屏节点的几何。
     pub fn geometry(&self) -> TreeGeometry {
         let mut geometry = TreeGeometry::default();
@@ -395,8 +475,8 @@ pub fn clamp_ratio(ratio: f32, extent: f32, min_first: f32, min_second: f32) -> 
     if extent <= 0. {
         return ratio.clamp(MIN_RATIO, MAX_RATIO);
     }
-    let lower = (min_first / extent).max(MIN_RATIO).min(0.45);
-    let upper = (1. - min_second / extent).min(MAX_RATIO).max(0.55);
+    let lower = (min_first / extent).clamp(MIN_RATIO, 0.45);
+    let upper = (1. - min_second / extent).clamp(0.55, MAX_RATIO);
     ratio.clamp(lower, upper)
 }
 
@@ -462,6 +542,7 @@ mod tests {
             second: Box::new(PaneTree::split(
                 split_id(2),
                 Axis::Vertical,
+                0.5,
                 PaneTree::leaf(pane(2)),
                 PaneTree::leaf(pane(3)),
             )),
@@ -564,6 +645,75 @@ mod tests {
         assert!((tree.min_extent(Axis::Horizontal) - (12. + 12.)).abs() < 1e-6);
         // 垂直方向：左列与右侧上下相加取较大者。
         assert!((tree.min_extent(Axis::Vertical) - (8. + 8.)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn swap_exchanges_positions_and_keeps_shape() {
+        let mut tree = sample_tree();
+        let shape = tree.clone();
+
+        // 跨子树交换：左窗格与右下窗格互换。
+        assert!(tree.swap(pane(1), pane(3)));
+        assert_eq!(tree.leaves(), vec![pane(3), pane(2), pane(1)]);
+        assert!(tree.same_shape(&shape), "交换不改变布局形状");
+        assert_eq!(
+            tree.geometry().pane_rect(pane(3)),
+            shape.geometry().pane_rect(pane(1)),
+        );
+
+        // 同一子树内交换。
+        assert!(tree.swap(pane(2), pane(1)));
+        assert_eq!(tree.leaves(), vec![pane(3), pane(1), pane(2)]);
+
+        // 未知窗格不改变结构。
+        let before = tree.clone();
+        assert!(!tree.swap(pane(2), pane(9)));
+        assert!(!tree.swap(pane(9), pane(2)));
+        assert_eq!(tree, before);
+    }
+
+    #[test]
+    fn split_node_reads_axis_and_ratio() {
+        let tree = sample_tree();
+        assert_eq!(
+            tree.split_node(split_id(1)),
+            Some((Axis::Horizontal, 2. / 3.))
+        );
+        assert_eq!(tree.split_node(split_id(2)), Some((Axis::Vertical, 0.5)));
+        assert_eq!(tree.split_node(split_id(9)), None);
+        assert_eq!(PaneTree::leaf(pane(1)).split_node(split_id(1)), None);
+    }
+
+    #[test]
+    fn same_shape_ignores_identity_and_ratio_noise() {
+        let tree = sample_tree();
+        let mut moved = tree.clone();
+        assert!(moved.swap(pane(1), pane(3)));
+        assert!(moved.same_shape(&tree));
+
+        let mirrored = PaneTree::Split {
+            id: split_id(7),
+            axis: Axis::Horizontal,
+            ratio: 2. / 3.,
+            first: Box::new(PaneTree::leaf(pane(9))),
+            second: Box::new(PaneTree::split(
+                split_id(8),
+                Axis::Vertical,
+                0.5,
+                PaneTree::leaf(pane(8)),
+                PaneTree::leaf(pane(7)),
+            )),
+        };
+        assert!(mirrored.same_shape(&tree));
+
+        let different = PaneTree::split(
+            split_id(1),
+            Axis::Vertical,
+            0.5,
+            PaneTree::leaf(pane(1)),
+            PaneTree::leaf(pane(2)),
+        );
+        assert!(!different.same_shape(&tree));
     }
 
     #[test]
