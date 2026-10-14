@@ -2085,6 +2085,7 @@ dependencies = [
 name = "glim"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "glim_settings",
  "glim_ui",
  "glim_workspace",

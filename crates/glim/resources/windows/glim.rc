@@ -1,0 +1,35 @@
+#pragma code_page(65001)
+
+// 资源 ID 1 的图标：资源管理器文件图标、任务栏与窗口标题栏图标
+// （GPUI 在 Windows 上按资源 ID 1 读取窗口图标）。
+1 ICON "resources/windows/glim.ico"
+
+// 「属性 → 详细信息」中的版本信息；版本号由 build.rs 以 GLIM_VERSION /
+// GLIM_VERSION_STR 宏传入（编码为 UTF-8，见文件开头的 code_page）。
+1 VERSIONINFO
+ FILEVERSION GLIM_VERSION
+ PRODUCTVERSION GLIM_VERSION
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "Glim"
+            VALUE "FileDescription", "Glim 终端"
+            VALUE "FileVersion", GLIM_VERSION_STR
+            VALUE "InternalName", "glim"
+            VALUE "OriginalFilename", "glim.exe"
+            VALUE "ProductName", "Glim"
+            VALUE "ProductVersion", GLIM_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

@@ -24,6 +24,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # 平台数据目录：Windows `%APPDATA%`、macOS Application Support、Linux XDG。
 dirs = "6"
+# Windows：构建脚本把图标与版本信息编译进 exe 资源（`crates/glim/build.rs`）。
+embed-resource = "3"
 
 # 内部 crate，依赖方向见各 crate 的 Cargo.toml。
 glim_settings = { path = "crates/glim_settings" }

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Glim 应用图标</title>
+  <desc>「&gt;_」终端提示符，米金强调色（#c9ba91）绘制在深色圆角瓦片上。</desc>
+  <defs>
+    <linearGradient id="glim-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#252625"/>
+      <stop offset="1" stop-color="#151616"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#glim-tile)"/>
+  <rect x="1.5" y="1.5" width="253" height="253" rx="54.5" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="3"/>
+  <g fill="none" stroke="#c9ba91" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M63 76 121 128 63 180"/>
+    <path d="M142 180 193 180"/>
+  </g>
+</svg>

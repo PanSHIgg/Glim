@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# Windows：把图标与版本信息嵌入 exe（构建脚本见 build.rs）。
+[target.'cfg(windows)'.build-dependencies]
+embed-resource.workspace = true
+
 [dependencies]
 gpui-kit.workspace = true
 glim_settings.workspace = true

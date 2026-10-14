@@ -1,0 +1,5 @@
+# MSVC 目标静态链接 C 运行库：exe 不依赖 VCRUNTIME140.dll / MSVCP140.dll，
+# 在没有安装 VC++ 运行库的机器上也能直接启动（见 README 故障排查）。
+# `+crt-static` 是 Rust 对 MSVC 目标的稳定特性。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Glim 安装包定义（WiX Toolset 3）。
+     使用方式见 packaging/windows/build-msi.ps1；
+     $(var.*) 变量由 candle 的 -d 参数传入：GlimVersion、BinaryPath、IconPath、WelcomeRtf。 -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+      Id="*"
+      Name="Glim"
+      Language="2052"
+      Version="$(var.GlimVersion)"
+      Manufacturer="Glim"
+      UpgradeCode="{B45DA502-C00D-46C0-937A-C3179C736C12}">
+    <Package
+        InstallerVersion="500"
+        Compressed="yes"
+        InstallScope="perMachine"
+        Description="Glim 终端"
+        Comments="Glim：基于 GPUI 的本地终端"
+        Languages="2052"
+        SummaryCodepage="936" />
+
+    <!-- 升级安装：同一 UpgradeCode 的不同产品代码，自动卸载旧版。
+         允许同版本覆盖：重新构建的 0.1.0 可以直接装到已装的 0.1.0 上（预览期的常见路径）。 -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="已经安装了更新版本的 Glim；请先在「设置 → 应用」中卸载它。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="GlimIcon" SourceFile="$(var.IconPath)" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.WelcomeRtf)" />
+
+    <UIRef Id="WixUI_Minimal" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+
+    <Feature Id="MainFeature" Title="Glim" Level="1">
+      <ComponentRef Id="GlimApplication" />
+      <ComponentRef Id="GlimStartMenuShortcut" />
+    </Feature>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Glim">
+          <Component Id="GlimApplication" Guid="{E69EB73D-1237-4943-8DF5-77AA0F6B3F5C}" Win64="yes">
+            <File Id="glim.exe"
+                  Source="$(var.BinaryPath)"
+                  KeyPath="yes"
+                  Vital="yes" />
+            <!-- 「应用和功能」列表中的应用图标：直接指向内置图标的 exe。 -->
+            <RegistryValue Root="HKLM"
+                           Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]"
+                           Name="DisplayIcon"
+                           Type="string"
+                           Value="[INSTALLFOLDER]glim.exe" />
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="GlimStartMenuFolder" Name="Glim">
+          <!-- 开始菜单快捷方式按用户写入：以 HKCU 注册表值作为组件 KeyPath
+               （ICE43/ICE57 要求非公告快捷方式这样做）。 -->
+          <Component Id="GlimStartMenuShortcut" Guid="{8CA047AD-246D-43B6-BFA7-307AA3CC125F}">
+            <Shortcut Id="GlimShortcut"
+                      Name="Glim"
+                      Description="Glim 终端"
+                      Target="[INSTALLFOLDER]glim.exe"
+                      WorkingDirectory="INSTALLFOLDER"
+                      Icon="GlimIcon"
+                      IconIndex="0" />
+            <RemoveFolder Id="RemoveGlimStartMenuFolder"
+                          Directory="GlimStartMenuFolder"
+                          On="uninstall" />
+            <RegistryValue Root="HKCU"
+                           Key="Software\Glim"
+                           Name="StartMenuShortcut"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+  </Product>
+</Wix>

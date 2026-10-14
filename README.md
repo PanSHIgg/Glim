@@ -1,5 +1,7 @@
 # Glim
 
+<img src="design/logo/glim-app-icon.png" alt="Glim 图标" width="96" align="right">
+
 基于 GPUI 的本地终端，优先支持 Windows；分阶段构建计划见 [plan.md](plan.md)。
 
 ## 当前进度
@@ -75,15 +77,31 @@ cargo build --release        # 分发给其他机器（调试版不能跨机器�
 分屏树与最小尺寸约束；`config.toml` 与 `workspace.toml` 的读取失败
 都回退到默认值，不会阻塞启动。
 
+### 打包安装程序（Windows）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\windows\build-msi.ps1
+```
+
+脚本先做 `cargo build --release -p glim`，再用 WiX Toolset 3 生成
+`target\wix\Glim-<版本>-x64.msi`：每机器安装到 `Program Files\Glim`，写入开始菜单快捷方式，
+同版本号覆盖、高版本自动提示，卸载时一并清理。exe 内置图标与版本信息
+（`crates/glim/resources/windows`，图标是设计稿的「&gt;_」标记，见 [design/logo](design/logo/README.md)）。
+
+未检测到 WiX 时脚本会从 nuget.org 下载官方 `wix` 3.14.1 包到 `target\wix` 并校验 SHA256；
+已安装 WiX 的环境用 `-WixDirectory` 指定，`-SkipBuild` 可以跳过构建。
+安装包默认不签名（SmartScreen 可能提示）；正式分发前用 `signtool sign` 对生成的 `.msi`
+与 `glim.exe` 签名。
+
 ## 故障排查
 
 启动失败（窗口没有出现，或一闪而过）时先看数据目录的运行日志
 `%APPDATA%\Glim\glim.log`（目录可用 `GLIM_CONFIG_DIR` 覆盖）：每次启动写一行，
 启动阶段的 panic 追加一行（位置与消息），超过 256 KiB 后从空文件重新开始。
 
-- 没有任何「启动」行：进程没有进入主程序。常见原因是缺少 VC++ 运行库
-  （`VCRUNTIME140.dll`，安装 Microsoft Visual C++ 2015–2022 Redistributable），
-  或被安全软件 / SmartScreen 拦截（右键属性里「解除锁定」）。
+- 没有任何「启动」行：进程没有进入主程序。发行版已静态链接 C 运行库
+  （`.cargo/config.toml` 的 `+crt-static`），不需要安装 VC++ 运行库；
+  常见原因是被安全软件 / SmartScreen 拦截（右键属性里「解除锁定」）。
 - `panic ... failed to initialize DirectX`：目标机器没有可用的 DirectX 11 设备。
   界面由 GPUI 用 Direct3D 渲染，需要支持功能级别 10.1 以上的适配器；
   虚拟机、远程桌面或缺少显卡驱动时可能不满足。
