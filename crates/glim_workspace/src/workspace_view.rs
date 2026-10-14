@@ -1408,6 +1408,24 @@ impl WorkspaceView {
                 this.open_tab(window, cx);
             }));
 
+        // 标题栏整体是窗口拖动区（Windows 的命中测试优先于子元素）；
+        // 交互区域用 `occlude` 遮挡拖动区，按钮才能收到真实点击。
+        let toolbar = h_flex()
+            .gap_1()
+            .items_center()
+            .child(self.render_split_button())
+            .child(self.render_layout_button(cx))
+            .child(
+                Button::new("open-settings")
+                    .icon(IconName::Settings)
+                    .ghost()
+                    .tooltip("设置 · Ctrl+,")
+                    .accessibility_label("设置")
+                    .on_click(|_, window, cx| {
+                        glim_settings::open_settings_dialog(window, cx);
+                    }),
+            );
+
         TitleBar::new()
             .h(rems(glim_ui::TITLE_BAR_HEIGHT_REMS))
             .bg(cx.theme().title_bar)
@@ -1419,21 +1437,10 @@ impl WorkspaceView {
                     .gap_1()
                     .pr_2()
                     .child(brand)
-                    .child(tab_bar)
-                    .child(new_tab)
+                    .child(div().occlude().child(tab_bar))
+                    .child(div().occlude().child(new_tab))
                     .child(div().flex_1().min_w_0())
-                    .child(self.render_split_button())
-                    .child(self.render_layout_button(cx))
-                    .child(
-                        Button::new("open-settings")
-                            .icon(IconName::Settings)
-                            .ghost()
-                            .tooltip("设置 · Ctrl+,")
-                            .accessibility_label("设置")
-                            .on_click(|_, window, cx| {
-                                glim_settings::open_settings_dialog(window, cx);
-                            }),
-                    ),
+                    .child(div().occlude().child(toolbar)),
             )
             .into_any_element()
     }
