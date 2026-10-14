@@ -1,4 +1,4 @@
-//! 工作区视图：标签页、分屏窗格、状态栏与关闭确认。
+//! 工作区视图：标签页、分屏窗格、会话状态与关闭确认。
 //!
 //! 工作区拥有标签页与分屏树，每个窗格是一个独立的终端视图实体。
 //! 切换标签、分屏、缩放与拖动分隔线只改变布局，不重建会话；
@@ -8,9 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{
-    Button, ButtonVariant, ButtonVariants as _, Toggle, ToggleVariants as _,
-};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
@@ -518,7 +516,7 @@ impl WorkspaceView {
         let options = terminal_options(directory, shell, cx);
         let view = cx.new(|cx| TerminalView::with_options(options, window, cx));
         let events = cx.subscribe(&view, |_this, _view, _event: &TerminalViewEvent, cx| {
-            // 标题与状态变化需要在标签与状态栏上反映。
+            // 标题与状态变化需要在标签与标题栏状态上反映。
             cx.notify();
         });
         self.panes.insert(
@@ -918,7 +916,7 @@ impl WorkspaceView {
         self.layout.is_some()
     }
 
-    /// 打开 / 关闭布局面板（`Alt+Z`、工具栏按钮）。
+    /// 打开 / 关闭布局面板（`Alt+Z`、拖动窗格标题到顶部热区）。
     fn toggle_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_layout_open() {
             self.close_layout(window, cx);
@@ -1347,7 +1345,7 @@ impl WorkspaceView {
 
     // ---- 渲染 ----
 
-    /// 顶部标题栏：品牌、标签页与常用操作；平台窗口控件由 `TitleBar` 提供。
+    /// 顶部标题栏：品牌、标签页、会话状态与设置；平台窗口控件由 `TitleBar` 提供。
     fn render_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let active_index = self.active_tab_index().unwrap_or(0);
         let tabs: Vec<(TabId, SharedString)> = self
@@ -1409,12 +1407,11 @@ impl WorkspaceView {
             }));
 
         // 标题栏整体是窗口拖动区（Windows 的命中测试优先于子元素）；
-        // 交互区域用 `occlude` 遮挡拖动区，按钮才能收到真实点击。
+        // 交互区域用 `occlude` 遮挡拖动区，状态与按钮才能收到真实点击。
         let toolbar = h_flex()
             .gap_1()
             .items_center()
-            .child(self.render_split_button())
-            .child(self.render_layout_button(cx))
+            .child(self.render_status_cluster(cx))
             .child(
                 Button::new("open-settings")
                     .icon(IconName::Settings)
@@ -1445,44 +1442,39 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// 顶部的分屏入口；与窗格上的分屏按钮共用同一组动作。
-    fn render_split_button(&self) -> AnyElement {
-        Button::new("split-menu")
-            .icon(IconName::Columns2)
-            .label("分屏…")
-            .ghost()
-            .tooltip("分屏 · Ctrl+Shift+D / E")
-            .dropdown_menu(|menu, _window, _cx| {
-                menu.item(
-                    PopupMenuItem::new("向右分屏")
-                        .icon(IconName::Columns2)
-                        .action(Box::new(SplitRight)),
-                )
-                .item(
-                    PopupMenuItem::new("向下分屏")
-                        .icon(IconName::Rows2)
-                        .action(Box::new(SplitDown)),
-                )
-            })
-            .into_any_element()
-    }
+    /// 标题栏右侧的会话状态：活动标签的窗格数量、编码与主题胶囊。
+    ///
+    /// 分屏入口保留在窗格标题栏上；布局面板用 `Alt+Z` 或把窗格标题
+    /// 拖到顶部热区打开，标题栏不再重复这两个入口。
+    fn render_status_cluster(&self, cx: &mut Context<Self>) -> AnyElement {
+        let pane_count = self
+            .active_tab_entry()
+            .and_then(|tab| tab.tree.as_ref())
+            .map(|tree| tree.leaves().len())
+            .unwrap_or(0);
+        let count_text = if self.preview_tree().is_some() {
+            format!("{pane_count} 个窗格 · 预览中")
+        } else if self.zoomed_pane().is_some() {
+            format!("{pane_count} 个窗格 · 已聚焦")
+        } else {
+            format!("{pane_count} 个窗格")
+        };
 
-    /// 顶部的布局入口：打开排列窗格面板，打开期间保持按下态。
-    fn render_layout_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        Toggle::new("layout-toggle")
-            .ghost()
-            .checked(self.is_layout_open())
-            .icon(Icon::new(IconName::LayoutTemplate))
-            .label("布局…")
-            .tooltip("排列窗格 · Alt+Z")
-            .on_click(cx.listener(|this, checked: &bool, window, cx| {
-                if *checked {
-                    this.open_layout(None, cx);
-                    window.focus(&this.layout_focus, cx);
-                } else {
-                    this.close_layout(window, cx);
-                }
-            }))
+        let separator = || div().w(px(1.)).h_2p5().bg(cx.theme().border).flex_none();
+
+        h_flex()
+            .gap_2()
+            .items_center()
+            .pl_2()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(div().flex_none().child(count_text))
+            .child(separator())
+            .child(div().flex_none().child("UTF-8"))
+            .child(separator())
+            .child(
+                ThemeCapsule::new(self.theme_preference).on_select(cx.listener(Self::select_theme)),
+            )
             .into_any_element()
     }
 
@@ -1859,55 +1851,6 @@ impl WorkspaceView {
                     .text_color(cx.theme().muted_foreground)
                     .child("新建标签页")
                     .when_some(shortcut, |this, kbd| this.child(kbd)),
-            )
-            .into_any_element()
-    }
-
-    fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let active = self.active_tab_entry().and_then(|tab| tab.active);
-        let (path, shell) = match active.and_then(|pane| self.panes.get(&pane)) {
-            Some(entry) => {
-                let terminal = entry.view.read(cx);
-                (pane_heading(terminal), terminal.shell_label().to_owned())
-            }
-            None => ("没有活动终端".to_owned(), "—".to_owned()),
-        };
-
-        let pane_count = self
-            .active_tab_entry()
-            .and_then(|tab| tab.tree.as_ref())
-            .map(|tree| tree.leaves().len())
-            .unwrap_or(0);
-        let count_text = if self.preview_tree().is_some() {
-            format!("{pane_count} 个窗格 · 预览中")
-        } else if self.zoomed_pane().is_some() {
-            format!("{pane_count} 个窗格 · 已聚焦")
-        } else {
-            format!("{pane_count} 个窗格")
-        };
-
-        let separator = || div().w(px(1.)).h_2p5().bg(cx.theme().border).flex_none();
-
-        h_flex()
-            .h_9()
-            .px_4()
-            .gap_2()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .border_t_1()
-            .border_color(cx.theme().status_bar_border)
-            .bg(cx.theme().status_bar)
-            .child(Icon::new(IconName::Terminal).size_3p5().flex_none())
-            .child(div().min_w_0().truncate().child(path))
-            .child(separator())
-            .child(div().flex_none().child(shell))
-            .child(div().flex_1())
-            .child(div().flex_none().child(count_text))
-            .child(separator())
-            .child(div().flex_none().child("UTF-8"))
-            .child(separator())
-            .child(
-                ThemeCapsule::new(self.theme_preference).on_select(cx.listener(Self::select_theme)),
             )
             .into_any_element()
     }
@@ -2567,7 +2510,6 @@ impl Render for WorkspaceView {
                     })
                     .child(self.render_layout_panel(window, cx)),
             )
-            .child(self.render_status_bar(cx))
             .when(dragging, |this| this.child(self.render_drag_ghost(cx)))
     }
 }

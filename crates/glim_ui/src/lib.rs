@@ -1,7 +1,7 @@
 //! 产品界面基础：主题、字体、间距、图标与公共展示组件。
 //!
 //! 提供产品主题装配（[`init`]）、终端字体的解析与应用
-//! （[`apply_appearance`]）、状态栏的主题选择胶囊（[`ThemeCapsule`]）
+//! （[`apply_appearance`]）、标题栏的主题选择胶囊（[`ThemeCapsule`]）
 //! 与终端网格调色板（[`terminal_palette`]）。
 
 mod font;

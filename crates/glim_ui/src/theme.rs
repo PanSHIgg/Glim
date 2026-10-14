@@ -218,7 +218,7 @@ mod tests {
     use gpui_kit::component::ActiveTheme as _;
     use gpui_kit::{Hsla, TestAppContext, rgb};
 
-    /// 设计稿令牌落在主题上：标签页与状态栏颜色参与渲染。
+    /// 设计稿令牌落在主题上。
     #[gpui_kit::test]
     fn product_tokens_apply_to_theme(cx: &mut TestAppContext) {
         cx.update(|cx| {
