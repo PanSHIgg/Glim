@@ -74,6 +74,16 @@ impl TerminalOptions {
         self.shell.as_ref()
     }
 
+    /// 已指定的启动目录；`None` 表示平台默认目录。
+    pub fn working_directory(&self) -> Option<&std::path::Path> {
+        self.working_directory.as_deref()
+    }
+
+    /// 追加的子进程环境变量。
+    pub fn env(&self) -> &HashMap<String, String> {
+        &self.env
+    }
+
     /// 滚动历史行数。
     pub fn scrollback(&self) -> usize {
         self.scrollback

@@ -2095,8 +2095,15 @@ dependencies = [
 name = "glim_settings"
 version = "0.1.0"
 dependencies = [
+ "dirs 6.0.0",
  "glim_ui",
+ "gpui-base",
+ "gpui-component",
  "gpui-kit",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "serde",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -2130,6 +2137,7 @@ name = "glim_workspace"
 version = "0.1.0"
 dependencies = [
  "glim_settings",
+ "glim_terminal",
  "glim_terminal_view",
  "glim_ui",
  "gpui-base",
@@ -2137,6 +2145,8 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-platform",
+ "serde",
+ "toml 0.8.23",
 ]
 
 [[package]]

@@ -68,7 +68,7 @@ fn dark_config() -> ThemeConfig {
     ThemeConfig {
         name: "Glim Dark".into(),
         mode: ThemeMode::Dark,
-        mono_font_family: Some("Cascadia Mono".into()),
+        // 终端字族由 `font::init` 按已安装字体解析后应用。
         colors: dark_colors(),
         ..Default::default()
     }
@@ -78,7 +78,6 @@ fn light_config() -> ThemeConfig {
     ThemeConfig {
         name: "Glim Light".into(),
         mode: ThemeMode::Light,
-        mono_font_family: Some("Cascadia Mono".into()),
         colors: light_colors(),
         ..Default::default()
     }

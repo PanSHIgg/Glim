@@ -5,7 +5,7 @@
 //! 关闭运行中的会话需要确认，应用退出时统一汇总一次。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{
@@ -13,6 +13,7 @@ use gpui_kit::component::button::{
 };
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, ThemeStyled as _, WindowExt as _, h_flex, v_flex,
@@ -20,6 +21,9 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use glim_settings::{Settings, SettingsEvent, SettingsState};
+
+use glim_terminal::{ShellSpec, TerminalOptions};
 use glim_terminal_view::{TerminalStatus, TerminalView, TerminalViewEvent};
 use glim_ui::{ThemeCapsule, ThemePreference};
 
@@ -28,6 +32,7 @@ use crate::pane_tree::{
     Axis, Direction, PaneId, PaneTree, SplitId, TabId, clamp_ratio, nearest_in_direction,
 };
 use crate::split_element::{SplitLayoutOptions, build as build_split_layout};
+use crate::workspace_state::{self, LeafState, TabState, WorkspaceState};
 
 actions!(
     workspace,
@@ -121,6 +126,7 @@ fn bind_workspace_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-up", SwapPaneUp, Some("Workspace")),
         KeyBinding::new("ctrl-shift-down", SwapPaneDown, Some("Workspace")),
         KeyBinding::new("alt-z", OpenLayout, Some("Workspace")),
+        KeyBinding::new("ctrl-,", glim_settings::OpenSettings, Some("Workspace")),
         KeyBinding::new("escape", CancelLayout, Some("Workspace")),
         KeyBinding::new("left", PreviousLayout, Some("LayoutPanel")),
         KeyBinding::new("up", PreviousLayout, Some("LayoutPanel")),
@@ -217,6 +223,10 @@ pub(crate) struct SplitMetrics {
 /// 工作区外壳。
 pub struct WorkspaceView {
     theme_preference: ThemePreference,
+    /// 已应用的外观设置快照：设置变化时只有主题或字体变化才重新应用。
+    applied_settings: Settings,
+    /// 设置变化订阅；未安装设置服务时为 `None`。
+    _settings_subscription: Option<Subscription>,
     /// 标签页顺序。
     tabs: Vec<TabEntry>,
     /// 当前标签页。
@@ -250,19 +260,31 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
-    /// 创建工作区：启动一个真实终端，并登记窗口关闭确认。
+    /// 创建工作区：恢复上次布局，或启动一个真实终端，并登记窗口关闭确认。
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         bind_workspace_keys(cx);
 
-        let theme_preference = ThemePreference::default();
+        let settings = glim_settings::current(cx);
+        let theme_preference = settings.theme().to_preference();
         let appearance_observer = cx.observe_window_appearance(window, |this, window, cx| {
             if this.theme_preference.is_system() {
                 glim_ui::apply_theme_preference(this.theme_preference, Some(window), cx);
             }
         });
+        let settings_subscription = glim_settings::handle(cx).map(|state| {
+            cx.subscribe_in(
+                &state,
+                window,
+                |this, state, event: &SettingsEvent, window, cx| {
+                    this.on_settings_changed(state, *event, window, cx);
+                },
+            )
+        });
 
         let mut workspace = Self {
             theme_preference,
+            applied_settings: settings,
+            _settings_subscription: settings_subscription,
             tabs: Vec::new(),
             active_tab: TabId(0),
             panes: HashMap::new(),
@@ -282,23 +304,29 @@ impl WorkspaceView {
             _appearance_observer: appearance_observer,
         };
 
-        // 首次启动打开一个真实终端。
-        let tab = workspace.new_tab();
-        let pane = workspace.new_pane(None, window, cx);
-        workspace.active_tab = tab;
-        if let Some(entry) = workspace.tab_mut(tab) {
-            entry.tree = Some(PaneTree::leaf(pane));
-            entry.active = Some(pane);
+        match workspace_state::take_restore(cx) {
+            Some(state) => workspace.restore_state(state, window, cx),
+            None => {
+                // 首次启动打开一个真实终端。
+                let tab = workspace.new_tab();
+                let pane = workspace.new_pane(None, None, window, cx);
+                workspace.active_tab = tab;
+                if let Some(entry) = workspace.tab_mut(tab) {
+                    entry.tree = Some(PaneTree::leaf(pane));
+                    entry.active = Some(pane);
+                }
+                workspace.focus_pane(pane, window, cx);
+            }
         }
-        workspace.focus_pane(pane, window, cx);
 
-        // 窗口关闭：运行中的会话汇总为一次确认。
+        // 窗口关闭：运行中的会话汇总为一次确认；放行前保存工作区。
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             let Some(workspace) = weak.upgrade() else {
                 return true;
             };
             if workspace.read(cx).exit_confirmed {
+                workspace.update(cx, |workspace, cx| workspace.save_state(window, cx));
                 return true;
             }
             let busy = workspace
@@ -308,6 +336,7 @@ impl WorkspaceView {
                 .filter(|entry| entry.view.read(cx).has_running_task())
                 .count();
             if busy == 0 {
+                workspace.update(cx, |workspace, cx| workspace.save_state(window, cx));
                 return true;
             }
             workspace.update(cx, |workspace, cx| {
@@ -317,6 +346,143 @@ impl WorkspaceView {
         });
 
         workspace
+    }
+
+    /// 设置变化：应用主题与字体，保存失败时通知。
+    fn on_settings_changed(
+        &mut self,
+        state: &Entity<SettingsState>,
+        event: SettingsEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let next = state.read(cx).current().clone();
+        let appearance_changed = next.theme() != self.applied_settings.theme()
+            || next.font_family() != self.applied_settings.font_family()
+            || next.font_size() != self.applied_settings.font_size();
+        if appearance_changed {
+            let warning = glim_ui::apply_appearance(
+                next.theme().to_preference(),
+                next.font_family(),
+                next.font_size(),
+                Some(window),
+                cx,
+            );
+            if let Some(warning) = warning {
+                window.push_notification(Notification::warning(warning).title("设置"), cx);
+            }
+        }
+        self.theme_preference = next.theme().to_preference();
+        self.applied_settings = next;
+        if let SettingsEvent::Changed { saved: false } = event {
+            let message = state
+                .read(cx)
+                .save_error()
+                .unwrap_or("设置未保存")
+                .to_owned();
+            window.push_notification(Notification::error(message).title("设置"), cx);
+        }
+        cx.notify();
+    }
+
+    /// 恢复上次会话：为每个窗格启动新 shell，目录缺失时回退到用户目录。
+    fn restore_state(
+        &mut self,
+        state: WorkspaceState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut missing_directories = 0usize;
+        for tab_state in &state.tabs {
+            let tab = self.new_tab();
+            if let Some(node) = &tab_state.tree {
+                let leaves = workspace_state::leaves(node);
+                let mut panes = Vec::with_capacity(leaves.len());
+                for leaf in &leaves {
+                    let (directory, fell_back) =
+                        workspace_state::resolve_directory(leaf.directory.as_deref());
+                    if fell_back {
+                        missing_directories += 1;
+                    }
+                    panes.push(self.new_pane(directory, leaf.shell.clone(), window, cx));
+                }
+                let mut pending = panes.into_iter();
+                let tree = workspace_state::build_tree(node, &mut pending, &mut || {
+                    let id = SplitId(self.next_split_id);
+                    self.next_split_id += 1;
+                    id
+                });
+                if let Some(tree) = tree {
+                    let active_pane = tab_state
+                        .active_pane
+                        .and_then(|index| tree.leaves().get(index).copied())
+                        .or_else(|| tree.leaves().first().copied());
+                    if let Some(entry) = self.tab_mut(tab) {
+                        entry.tree = Some(tree);
+                        entry.active = active_pane;
+                    }
+                }
+            }
+        }
+
+        if let Some(tab) = self.tabs.get(state.active_tab) {
+            self.active_tab = tab.id;
+        }
+        self.reveal_active_tab();
+        if let Some(pane) = self.active_tab_entry().and_then(|tab| tab.active) {
+            self.focus_pane(pane, window, cx);
+        }
+        if missing_directories > 0 {
+            workspace_state::push_warning(
+                cx,
+                format!("{missing_directories} 个窗格的目录不存在，已回退到用户目录"),
+            );
+        }
+        cx.notify();
+    }
+
+    /// 保存工作区：关闭窗口或确认退出时调用；失败不阻塞退出。
+    pub(crate) fn save_state(&self, window: &Window, cx: &App) {
+        let Some(path) = workspace_state::workspace_file(cx) else {
+            return;
+        };
+        let state = self.collect_state(window, cx);
+        if let Err(error) = glim_settings::save_toml(&path, &state) {
+            eprintln!("保存工作区失败：{error}");
+        }
+    }
+
+    /// 收集当前布局、目录、shell 引用与窗口状态。
+    fn collect_state(&self, window: &Window, cx: &App) -> WorkspaceState {
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let tree = tab.tree.as_ref().map(|tree| {
+                    workspace_state::collect_tree(tree, &mut |pane| {
+                        let Some(entry) = self.panes.get(&pane) else {
+                            return LeafState::default();
+                        };
+                        let view = entry.view.read(cx);
+                        LeafState {
+                            directory: view
+                                .working_directory()
+                                .or_else(|| view.tracked_directory().map(Path::to_path_buf)),
+                            shell: view.shell_program().map(str::to_owned),
+                        }
+                    })
+                });
+                let active_pane = tab.active.and_then(|pane| {
+                    tab.tree.as_ref().and_then(|tree| {
+                        tree.leaves()
+                            .iter()
+                            .position(|candidate| *candidate == pane)
+                    })
+                });
+                TabState { tree, active_pane }
+            })
+            .collect();
+        workspace_state::new_state(window, self.active_tab_index().unwrap_or(0), tabs)
     }
 
     // ---- 标签页 ----
@@ -335,15 +501,20 @@ impl WorkspaceView {
     }
 
     /// 新建窗格；给定目录时以该目录启动 shell。
+    ///
+    /// `shell` 是恢复数据里的 shell 引用；`None` 时使用设置里的默认
+    /// shell（再缺省则按平台顺序查找）。
     fn new_pane(
         &mut self,
         directory: Option<PathBuf>,
+        shell: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PaneId {
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
-        let view = cx.new(|cx| TerminalView::with_working_directory(directory, window, cx));
+        let options = terminal_options(directory, shell, cx);
+        let view = cx.new(|cx| TerminalView::with_options(options, window, cx));
         let events = cx.subscribe(&view, |_this, _view, _event: &TerminalViewEvent, cx| {
             // 标题与状态变化需要在标签与状态栏上反映。
             cx.notify();
@@ -370,7 +541,7 @@ impl WorkspaceView {
     fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let directory = self.active_directory(cx);
         let tab = self.new_tab();
-        let pane = self.new_pane(directory, window, cx);
+        let pane = self.new_pane(directory, None, window, cx);
         self.active_tab = tab;
         if let Some(entry) = self.tab_mut(tab) {
             entry.tree = Some(PaneTree::leaf(pane));
@@ -480,7 +651,7 @@ impl WorkspaceView {
                 .get(&pane)
                 .and_then(|entry| entry.view.read(cx).working_directory())
         });
-        let new_pane = self.new_pane(directory, window, cx);
+        let new_pane = self.new_pane(directory, None, window, cx);
         let split = SplitId(self.next_split_id);
         self.next_split_id += 1;
 
@@ -611,7 +782,7 @@ impl WorkspaceView {
         let Some(index) = self.active_tab_index() else {
             return;
         };
-        let pane = self.new_pane(None, window, cx);
+        let pane = self.new_pane(None, None, window, cx);
         let tab = &mut self.tabs[index];
         tab.tree = Some(PaneTree::leaf(pane));
         tab.active = Some(pane);
@@ -1159,9 +1330,12 @@ impl WorkspaceView {
                 .ok_text("退出")
                 .cancel_text("取消")
                 .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _window, cx| {
+                .on_ok(move |_, window, cx| {
                     if let Some(workspace) = weak.upgrade() {
-                        workspace.update(cx, |workspace, _cx| workspace.exit_confirmed = true);
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.exit_confirmed = true;
+                            workspace.save_state(window, cx);
+                        });
                     }
                     cx.quit();
                     true
@@ -1222,6 +1396,16 @@ impl WorkspaceView {
             .child(div().flex_1())
             .child(self.render_split_button())
             .child(self.render_layout_button(cx))
+            .child(
+                Button::new("open-settings")
+                    .icon(IconName::Settings)
+                    .ghost()
+                    .tooltip("设置 · Ctrl+,")
+                    .accessibility_label("设置")
+                    .on_click(|_, window, cx| {
+                        glim_settings::open_settings_dialog(window, cx);
+                    }),
+            )
             .into_any_element()
     }
 
@@ -1974,8 +2158,17 @@ impl WorkspaceView {
         if self.theme_preference == *preference {
             return;
         }
-        self.theme_preference = *preference;
-        glim_ui::apply_theme_preference(*preference, Some(window), cx);
+        // 有设置服务时经设置写入并持久化；订阅统一应用主题与字体。
+        let persisted = glim_settings::handle(cx)
+            .map(|state| {
+                let theme = glim_settings::ThemeSetting::from(*preference);
+                state.update(cx, |state, cx| state.set_theme(theme, cx));
+            })
+            .is_some();
+        if !persisted {
+            self.theme_preference = *preference;
+            glim_ui::apply_theme_preference(*preference, Some(window), cx);
+        }
         cx.notify();
     }
 
@@ -2072,6 +2265,15 @@ impl WorkspaceView {
 
     fn open_layout_action(&mut self, _: &OpenLayout, window: &mut Window, cx: &mut Context<Self>) {
         self.toggle_layout(window, cx);
+    }
+
+    fn open_settings_action(
+        &mut self,
+        _: &glim_settings::OpenSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        glim_settings::open_settings_dialog(window, cx);
     }
 
     fn apply_layout_action(
@@ -2174,6 +2376,41 @@ impl WorkspaceView {
 }
 
 /// 窗格的展示名称：会话标题优先，否则使用 shell 名称。
+/// 组装会话选项：设置提供滚动历史、默认 shell 与环境变量；
+/// 目录与 shell 引用来自调用方（分屏继承或恢复数据）。
+fn terminal_options(
+    directory: Option<PathBuf>,
+    shell: Option<String>,
+    cx: &App,
+) -> TerminalOptions {
+    let settings = glim_settings::current(cx);
+    let mut options = TerminalOptions::default().with_scrollback(settings.scrollback());
+
+    // shell 配置引用按语义解析：当前配置优先（默认 shell 变更作用于
+    // 新会话），配置缺省时沿用恢复数据里的引用，再退回平台默认。
+    let spec = settings
+        .shell()
+        .map(settings_shell_spec)
+        .or_else(|| shell.map(ShellSpec::new));
+    if let Some(spec) = spec {
+        options = options.with_shell(spec);
+    }
+    if let Some(shell) = settings.shell() {
+        for (key, value) in shell.env() {
+            options = options.with_env(key.clone(), value.clone());
+        }
+    }
+    if let Some(directory) = directory {
+        options = options.with_working_directory(directory);
+    }
+    options
+}
+
+/// 设置里的 shell 配置转为会话参数。
+fn settings_shell_spec(shell: &glim_settings::ShellConfig) -> ShellSpec {
+    ShellSpec::new(shell.program()).with_args(shell.args().iter().cloned())
+}
+
 fn pane_title(terminal: &TerminalView) -> String {
     terminal
         .title()
@@ -2217,6 +2454,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::swap_up_action))
             .on_action(cx.listener(Self::swap_down_action))
             .on_action(cx.listener(Self::open_layout_action))
+            .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::apply_layout_action))
             .on_action(cx.listener(Self::cancel_layout_action))
             .on_action(cx.listener(Self::previous_layout_action))

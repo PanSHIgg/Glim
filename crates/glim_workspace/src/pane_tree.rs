@@ -3,6 +3,8 @@
 //! 纯逻辑，不依赖 GPUI：身份、结构操作、几何与最小尺寸约束都可以
 //! 单独测试。几何用 0–1 比例表达，最终像素布局由布局元素完成。
 
+use serde::{Deserialize, Serialize};
+
 /// 标签页身份；标签顺序变化不影响身份。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TabId(pub(crate) u64);
@@ -34,9 +36,11 @@ impl SplitId {
 }
 
 /// 分屏方向。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Axis {
     /// 左右排列（向右分屏）。
+    #[default]
     Horizontal,
     /// 上下排列（向下分屏）。
     Vertical,

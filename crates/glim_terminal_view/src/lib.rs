@@ -118,6 +118,8 @@ pub struct TerminalView {
     status: TerminalStatus,
     snapshot: Option<Arc<GridSnapshot>>,
     focus_handle: FocusHandle,
+    /// 实际使用的 shell（配置指定或平台默认）；会话与展示共用。
+    shell: Option<glim_terminal::ShellSpec>,
     shell_label: String,
     /// 会话标题（OSC 0/2 设置）；工作区用它显示标签名称。
     title: Option<String>,
@@ -171,14 +173,19 @@ impl TerminalView {
     ///
     /// 分屏时通过 [`TerminalOptions::with_working_directory`] 继承当前会话目录。
     pub fn with_options(
-        options: TerminalOptions,
+        mut options: TerminalOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let shell_label = options
-            .shell()
-            .cloned()
-            .or_else(glim_terminal::default_shell)
+        // 在此解析 shell 并写回配置：视图、会话与重启使用同一个程序。
+        if options.shell().is_none()
+            && let Some(shell) = glim_terminal::default_shell()
+        {
+            options = options.with_shell(shell);
+        }
+        let shell = options.shell().cloned();
+        let shell_label = shell
+            .as_ref()
             .map(|shell| shell.display_name())
             .unwrap_or_else(|| "shell".to_owned());
 
@@ -201,6 +208,7 @@ impl TerminalView {
             status: TerminalStatus::Starting,
             snapshot: None,
             focus_handle,
+            shell,
             shell_label,
             title: None,
             directory: None,
@@ -323,6 +331,11 @@ impl TerminalView {
         &self.shell_label
     }
 
+    /// 实际使用的 shell 程序路径；工作区保存 shell 引用时读取。
+    pub fn shell_program(&self) -> Option<&str> {
+        self.shell.as_ref().map(|shell| shell.program())
+    }
+
     /// 会话标题（OSC 0/2 设置）；未设置时为 `None`。
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
@@ -331,6 +344,11 @@ impl TerminalView {
     /// 跟踪到的最近工作目录；窗格标题用它显示当前位置。
     pub fn tracked_directory(&self) -> Option<&Path> {
         self.directory.as_deref()
+    }
+
+    /// 创建会话时指定的启动目录；用于工作区保存与恢复断言。
+    pub fn configured_directory(&self) -> Option<&Path> {
+        self.options.working_directory()
     }
 
     /// 焦点句柄；工作区切换标签或窗格时用它恢复键盘焦点。

@@ -7,8 +7,11 @@ publish.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 glim_settings.workspace = true
+glim_terminal.workspace = true
 glim_terminal_view.workspace = true
 glim_ui.workspace = true
+serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 # 界面集成测试需要无头窗口与事件模拟；在底层 GPUI crate 上直接开启

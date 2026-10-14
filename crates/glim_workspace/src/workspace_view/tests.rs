@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant};
 
 use gpui_base::test_support::{self as observation, ElementSnapshot};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Root;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Entity, InputEvent as _, KeyDownEvent, KeyUpEvent,
@@ -824,6 +825,332 @@ fn keyboard_swaps_panes_in_direction(cx: &mut TestAppContext) {
         assert_eq!(active_tree(&workspace, cx).leaves(), vec![first, second]);
         assert_eq!(session_id(&workspace, first, cx), first_session);
         assert_eq!(session_id(&workspace, second, cx), second_session);
+    })
+    .expect("window stays open");
+}
+
+// ---- 阶段 5：配置与工作区恢复 ----
+
+use crate::workspace_state::{self, LayoutNode, SplitNode, TabState, WindowState, WorkspaceState};
+/// 测试用数据目录：`${TEMP}/glim-workspace-tests/<name>/`。
+fn data_directory(name: &str) -> std::path::PathBuf {
+    let directory = std::env::temp_dir()
+        .join("glim-workspace-tests")
+        .join(format!("{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("create data directory");
+    directory
+}
+
+/// 初始化设置与工作区持久化，再打开窗口。
+fn open_workspace_with_storage(
+    cx: &mut TestAppContext,
+    config_path: std::path::PathBuf,
+    data_directory: std::path::PathBuf,
+) -> (AnyWindowHandle, Entity<WorkspaceView>) {
+    cx.update(|cx| {
+        glim_settings::init_with_path(cx, Some(config_path));
+        crate::init(cx, Some(data_directory));
+    });
+    open_workspace(cx)
+}
+
+/// 叶节点：目录与 shell 引用。
+fn leaf(directory: Option<&str>, shell: Option<&str>) -> LayoutNode {
+    LayoutNode {
+        directory: directory.map(str::to_owned),
+        shell: shell.map(str::to_owned),
+        split: None,
+    }
+}
+
+/// 分屏节点。
+fn split(axis: Axis, ratio: f32, first: LayoutNode, second: LayoutNode) -> LayoutNode {
+    LayoutNode {
+        directory: None,
+        shell: None,
+        split: Some(SplitNode {
+            axis,
+            ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }),
+    }
+}
+
+/// 恢复：标签页、分屏形状、目录与活动标签都按保存数据重建。
+#[gpui_kit::test]
+fn restores_tabs_layout_and_directories(cx: &mut TestAppContext) {
+    let data = data_directory("restore");
+    let config_path = data.join("config.toml");
+    let left = data.join("left");
+    let right = data.join("right");
+    std::fs::create_dir_all(&left).expect("left dir");
+    std::fs::create_dir_all(&right).expect("right dir");
+    let missing = data.join("missing");
+
+    let state = WorkspaceState {
+        version: 1,
+        window: Some(WindowState {
+            width: 1100.,
+            height: 700.,
+            maximized: false,
+        }),
+        active_tab: 1,
+        tabs: vec![
+            TabState {
+                tree: Some(split(
+                    Axis::Horizontal,
+                    2. / 3.,
+                    leaf(Some(&left.to_string_lossy()), Some("pwsh.exe")),
+                    leaf(Some(&right.to_string_lossy()), None),
+                )),
+                active_pane: Some(1),
+            },
+            TabState {
+                tree: Some(leaf(Some(&missing.to_string_lossy()), None)),
+                active_pane: Some(0),
+            },
+        ],
+    };
+    glim_settings::save_toml(&workspace_state::file_in(&data), &state).expect("write state");
+
+    let (handle, workspace) = open_workspace_with_storage(cx, config_path, data.clone());
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        let state = workspace.read(cx);
+        assert_eq!(state.tabs.len(), 2, "恢复两个标签页");
+        assert_eq!(state.active_tab, state.tabs[1].id, "活动标签按保存数据恢复");
+        assert_eq!(state.panes.len(), 3, "每个叶节点一个会话");
+
+        let tree = state.tabs[0].tree.as_ref().expect("first tree");
+        assert_eq!(tree.leaves().len(), 2);
+        match tree {
+            PaneTree::Split { axis, ratio, .. } => {
+                assert_eq!(*axis, Axis::Horizontal);
+                assert!((*ratio - 2. / 3.).abs() < 1e-3, "比例恢复");
+            }
+            _ => panic!("第一个标签页应为分屏"),
+        }
+
+        // 目录：存在时沿用；缺失时回退到用户目录。
+        let leaves = tree.leaves();
+        assert_eq!(
+            pane_session(&workspace, leaves[0], cx)
+                .read(cx)
+                .configured_directory(),
+            Some(left.as_path()),
+            "目录按保存数据恢复"
+        );
+        assert_eq!(
+            pane_session(&workspace, leaves[1], cx)
+                .read(cx)
+                .configured_directory(),
+            Some(right.as_path())
+        );
+        let restored_missing = state.tabs[1].tree.as_ref().expect("second tree").leaves()[0];
+        assert_eq!(
+            pane_session(&workspace, restored_missing, cx)
+                .read(cx)
+                .configured_directory(),
+            glim_settings::home_directory().as_deref(),
+            "缺失目录回退到用户目录"
+        );
+    })
+    .expect("window stays open");
+
+    let warnings = cx.update(|cx| crate::take_startup_warnings(cx));
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("回退到用户目录")),
+        "缺失目录应有启动提示: {warnings:?}"
+    );
+}
+
+/// 关闭时保存：布局、目录与窗口状态写入 workspace.toml。
+#[gpui_kit::test]
+fn closing_saves_layout_and_window_state(cx: &mut TestAppContext) {
+    let data = data_directory("save");
+    let config_path = data.join("config.toml");
+    let (handle, workspace) = open_workspace_with_storage(cx, config_path, data.clone());
+
+    let visual = VisualTestContext::from_window(handle, cx).into_mut();
+    visual.update(render_frame);
+    wait_until_idle(cx, &workspace);
+    visual.update(|window, cx| press(window, "ctrl-shift-d", cx));
+
+    let (first, second) = visual.update(|_, cx| {
+        let leaves = active_tree(&workspace, cx).leaves();
+        (leaves[0], leaves[1])
+    });
+    let (first_session, second_session) = visual.update(|_, cx| {
+        (
+            session_id(&workspace, first, cx),
+            session_id(&workspace, second, cx),
+        )
+    });
+    assert_ne!(first_session, second_session, "两个窗格是独立会话");
+    visual.update(|_, cx| {
+        assert_eq!(active_tree(&workspace, cx).leaves(), vec![first, second]);
+    });
+    assert!(visual.simulate_close(), "空闲工作区可以直接关闭");
+
+    let path = workspace_state::file_in(&data);
+    let mut saved: WorkspaceState = glim_settings::load_toml(&path)
+        .expect("load")
+        .expect("file exists");
+    saved.validate().expect("valid state");
+    assert_eq!(saved.tabs.len(), 1);
+    assert_eq!(saved.active_tab, 0);
+    let tree = saved.tabs[0].tree.as_ref().expect("tree");
+    match tree {
+        LayoutNode {
+            split: Some(split), ..
+        } => {
+            assert_eq!(split.axis, Axis::Horizontal);
+            assert!((split.ratio - 0.5).abs() < 1e-3);
+        }
+        _ => panic!("保存的分屏树应包含分屏节点"),
+    }
+    let saved_leaves = workspace_state::leaves(tree);
+    assert_eq!(saved_leaves.len(), 2);
+    for leaf in &saved_leaves {
+        assert!(leaf.directory.is_some(), "保存已知工作目录");
+    }
+    let window = saved.window.expect("window state");
+    assert!(window.width >= 800. && window.height >= 600.);
+}
+
+/// 无效恢复数据：整份忽略、按默认工作区启动并提示。
+#[gpui_kit::test]
+fn invalid_workspace_file_falls_back_to_default(cx: &mut TestAppContext) {
+    let data = data_directory("invalid");
+    std::fs::write(workspace_state::file_in(&data), "version = \"坏数据\"\n")
+        .expect("write invalid state");
+
+    let (handle, workspace) =
+        open_workspace_with_storage(cx, data.join("config.toml"), data.clone());
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        let state = workspace.read(cx);
+        assert_eq!(state.tabs.len(), 1, "无效数据回退到默认工作区");
+        assert_eq!(state.panes.len(), 1);
+    })
+    .expect("window stays open");
+
+    let warnings = cx.update(|cx| crate::take_startup_warnings(cx));
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("已按默认工作区启动")),
+        "无效数据应有启动提示: {warnings:?}"
+    );
+}
+
+/// 设置界面：`Ctrl+,` 打开对话框，保存写入 config.toml。
+#[gpui_kit::test]
+fn settings_dialog_saves_config(cx: &mut TestAppContext) {
+    let data = data_directory("settings-dialog");
+    let config_path = data.join("config.toml");
+    let (handle, _workspace) = open_workspace_with_storage(cx, config_path.clone(), data.clone());
+
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        press(window, "ctrl-,", cx);
+        assert!(is_visible(window, "settings-save"), "设置对话框应打开");
+
+        // 在对话框内改选主题后保存。
+        click(window, "settings-theme-light", cx);
+        click(window, "settings-save", cx);
+        assert!(!is_visible(window, "settings-save"), "保存后对话框关闭");
+    })
+    .expect("window stays open");
+
+    let settings: glim_settings::Settings = glim_settings::load_toml(&config_path)
+        .expect("load")
+        .expect("file exists");
+    assert_eq!(settings.theme(), glim_settings::ThemeSetting::Light);
+    assert_eq!(settings.scrollback(), glim_settings::DEFAULT_SCROLLBACK);
+}
+
+/// 设置变化：主题胶囊写入配置并立即生效；字体变化应用到主题。
+#[gpui_kit::test]
+fn settings_changes_persist_and_apply(cx: &mut TestAppContext) {
+    let data = data_directory("settings-apply");
+    let config_path = data.join("config.toml");
+    let (handle, workspace) = open_workspace_with_storage(cx, config_path.clone(), data.clone());
+
+    // 点击与断言分开在两次更新中：事件在更新结束时派发。
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        click(window, "theme-capsule-light", cx);
+    })
+    .expect("window stays open");
+
+    cx.update_window(handle, |_, _window, cx| {
+        assert!(!cx.theme().is_dark(), "主题立即生效");
+        assert_eq!(
+            glim_settings::handle(cx)
+                .expect("settings service")
+                .read(cx)
+                .current()
+                .theme(),
+            glim_settings::ThemeSetting::Light,
+            "设置已写入"
+        );
+        assert_eq!(
+            workspace.read(cx).theme_preference,
+            glim_ui::ThemePreference::Light,
+            "视图跟随设置"
+        );
+    })
+    .expect("window stays open");
+
+    let settings: glim_settings::Settings = glim_settings::load_toml(&config_path)
+        .expect("load")
+        .expect("file exists");
+    assert_eq!(settings.theme(), glim_settings::ThemeSetting::Light);
+
+    // 字体变化经订阅应用：字号进入主题，终端在下一帧使用新值。
+    let settings_state = cx.update(|cx| glim_settings::handle(cx).expect("settings service"));
+    cx.update(|cx| {
+        settings_state.update(cx, |state, cx| {
+            let next = state
+                .current()
+                .clone()
+                .with_font_size(Some(16.))
+                .with_font_family(None::<String>);
+            state.apply(next, cx);
+        });
+    });
+    assert_eq!(
+        cx.update(|cx| cx.theme().mono_font_size),
+        px(16.),
+        "字号已应用"
+    );
+
+    // 默认 shell 变更作用于新会话：分屏创建的新窗格使用新配置。
+    cx.update(|cx| {
+        settings_state.update(cx, |state, cx| {
+            let next = state
+                .current()
+                .clone()
+                .with_shell(Some(glim_settings::ShellConfig::new("cmd.exe")));
+            state.apply(next, cx);
+        });
+    });
+    cx.update_window(handle, |_, window, cx| press(window, "ctrl-shift-d", cx))
+        .expect("window stays open");
+    cx.update_window(handle, |_, _window, cx| {
+        let active = active_pane(&workspace, cx);
+        assert_eq!(
+            pane_session(&workspace, active, cx)
+                .read(cx)
+                .shell_program(),
+            Some("cmd.exe"),
+            "新会话使用配置的默认 shell"
+        );
     })
     .expect("window stays open");
 }

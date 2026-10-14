@@ -25,6 +25,49 @@ const UNDERLINE_CURSOR_HEIGHT: f32 = 2.;
 /// 文本装饰线粗细（物理界限）。
 const DECORATION_THICKNESS: f32 = 1.;
 
+/// 终端字体的回退链：主字族缺少字形时按序尝试。
+///
+/// 覆盖等宽备用字体与常见中文字族；未安装的字族会被文本系统跳过。
+fn fallback_families() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &[
+            "Consolas",
+            "Microsoft YaHei",
+            "Microsoft YaHei UI",
+            "SimSun",
+        ]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        &["Menlo", "PingFang SC", "Hiragino Sans GB"]
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        &[
+            "DejaVu Sans Mono",
+            "Noto Sans Mono",
+            "Noto Sans Mono CJK SC",
+            "Noto Sans CJK SC",
+        ]
+    }
+}
+
+/// 回退链只构建一次并共享。
+fn terminal_fallbacks() -> FontFallbacks {
+    static FALLBACKS: std::sync::OnceLock<FontFallbacks> = std::sync::OnceLock::new();
+    FALLBACKS
+        .get_or_init(|| {
+            FontFallbacks::from_fonts(
+                fallback_families()
+                    .iter()
+                    .map(|family| (*family).to_owned())
+                    .collect(),
+            )
+        })
+        .clone()
+}
+
 /// 视口几何：元素原点与单元尺寸。
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ElementGeometry {
@@ -674,7 +717,7 @@ fn terminal_font(family: &SharedString, weight: FontWeight, style: FontStyle) ->
     Font {
         family: family.clone(),
         features: FontFeatures::disable_ligatures(),
-        fallbacks: None,
+        fallbacks: Some(terminal_fallbacks()),
         weight,
         style,
     }

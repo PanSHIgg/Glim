@@ -2,11 +2,14 @@
 //!
 //! 工作区拥有标签页与分屏树，每个窗格是一个独立的终端视图实体。
 //! 布局操作与关闭流程见 [`WorkspaceView`]；分屏结构是可单独测试的
-//! 纯逻辑（`pane_tree`），像素布局由 `split_element` 完成。
+//! 纯逻辑（`pane_tree`），像素布局由 `split_element` 完成，布局、
+//! 目录与窗口状态的保存与恢复见 `workspace_state`。
 
 mod layout;
 mod pane_tree;
 mod split_element;
+mod workspace_state;
 mod workspace_view;
 
+pub use workspace_state::{init, take_startup_warnings, window_bounds};
 pub use workspace_view::WorkspaceView;

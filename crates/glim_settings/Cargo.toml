@@ -7,3 +7,15 @@ publish.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 glim_ui.workspace = true
+serde.workspace = true
+toml.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+# 设置状态的界面集成测试需要无头应用上下文；与 glim_workspace 使用同一组
+# 底层测试特性（gpui-kit 的 test-support 会牵入未使用的 gpui-fast 依赖）。
+gpui-base = { version = "0.7.3", features = ["test-support"] }
+gpui-component = { version = "0.7.3", features = ["test-support"] }
+gpui-pre = { version = "=0.3.9", features = ["test-support"] }
+gpui-pre-platform = { version = "=0.3.9", features = ["test-support"] }
+toml.workspace = true

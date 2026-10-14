@@ -49,8 +49,9 @@ impl ShellSpec {
 
 /// 解析默认 shell。
 ///
-/// 查找顺序：`GLIM_SHELL` 环境变量（临时调试入口，阶段 5 由配置替代）、
-/// `pwsh`、Windows PowerShell、`COMSPEC`（Windows 上另有 `cmd.exe` 兜底）。
+/// 查找顺序：`GLIM_SHELL` 环境变量（调试入口；配置了默认 shell 时由
+/// 配置优先）、`pwsh`、Windows PowerShell、`COMSPEC`（Windows 上另有
+/// `cmd.exe` 兜底）。
 pub fn default_shell() -> Option<ShellSpec> {
     if let Some(program) = std::env::var_os("GLIM_SHELL")
         && !program.is_empty()
