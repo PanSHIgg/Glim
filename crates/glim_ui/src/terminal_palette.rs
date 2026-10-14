@@ -34,6 +34,24 @@ pub fn terminal_palette(cx: &App) -> TerminalPalette {
     }
 }
 
+/// 展开 256 色索引：0–15 落在主题调色板，16–231 是 6×6×6 色立方，
+/// 232–255 是 24 级灰阶（与 xterm、Zed 的取值一致）。
+pub fn indexed_color(index: u8, palette: &TerminalPalette) -> Hsla {
+    match index {
+        0..=15 => palette.ansi[index as usize],
+        16..=231 => {
+            let cube = index as u32 - 16;
+            let channel = |step: u32| if step == 0 { 0 } else { step * 40 + 55 };
+            rgb((channel(cube / 36) << 16) | (channel((cube % 36) / 6) << 8) | channel(cube % 6))
+                .into()
+        }
+        _ => {
+            let level = (index as u32 - 232) * 10 + 8;
+            rgb((level << 16) | (level << 8) | level).into()
+        }
+    }
+}
+
 fn search_highlight(theme: &Theme) -> Hsla {
     let mut color = theme.warning;
     color.a = 0.30;
@@ -95,5 +113,44 @@ fn light_palette(theme: &Theme) -> TerminalPalette {
             rgb(0x4f8a83).into(),
             rgb(0xf4f5ef).into(),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TerminalPalette, indexed_color};
+    use gpui_kit::{Hsla, rgb};
+
+    fn palette() -> TerminalPalette {
+        let sample: Hsla = rgb(0x123456).into();
+        TerminalPalette {
+            background: sample,
+            foreground: sample,
+            cursor: sample,
+            selection: sample,
+            search_highlight: sample,
+            scrollbar_thumb: sample,
+            ansi: [sample; 16],
+        }
+    }
+
+    /// 0–15 使用主题调色板。
+    #[test]
+    fn low_indices_use_the_theme_palette() {
+        let palette = palette();
+        assert_eq!(indexed_color(0, &palette), palette.ansi[0]);
+        assert_eq!(indexed_color(15, &palette), palette.ansi[15]);
+    }
+
+    /// 色立方与灰阶按 xterm 取值展开，不再回退到亮白。
+    #[test]
+    fn high_indices_expand_to_xterm_colors() {
+        let palette = palette();
+        assert_eq!(indexed_color(16, &palette), rgb(0x000000).into());
+        assert_eq!(indexed_color(196, &palette), rgb(0xff0000).into());
+        assert_eq!(indexed_color(231, &palette), rgb(0xffffff).into());
+        assert_eq!(indexed_color(232, &palette), rgb(0x080808).into());
+        assert_eq!(indexed_color(255, &palette), rgb(0xeeeeee).into());
+        assert_eq!(indexed_color(21, &palette), rgb(0x0000ff).into());
     }
 }

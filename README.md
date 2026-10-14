@@ -16,7 +16,7 @@
   - `Ctrl+Shift+方向键` 交换窗格；聚焦分隔线后方向键调整比例、`Home` 回到均分。
 - 阶段 5：配置与工作区恢复：
   - `config.toml`（`%APPDATA%\Glim\config.toml`，可用 `GLIM_CONFIG_DIR` 覆盖）：主题、终端字体（族与字号）、默认 shell（程序 / 参数 / 环境变量）、滚动历史；
-  - 设置对话框（工具栏「设置」或 `Ctrl+,`）：主题分段选择、字体、默认 shell、滚动历史；保存写入配置，shell 环境变量等高级设置与未知字段保留在配置文件中；
+  - 设置对话框（工具栏「设置」或 `Ctrl+,`）：主题分段选择、字体（已安装字族下拉，可搜索）、默认 shell（探测到的 pwsh、Windows PowerShell、cmd 下拉）、滚动历史；保存写入配置，shell 环境变量等高级设置与未知字段保留在配置文件中；
   - 主题与字体立即生效；默认 shell 与滚动历史作用于新会话；
   - `workspace.toml` 保存标签页、分屏树（方向与比例）、每个窗格的工作目录与 shell 引用、窗口尺寸与最大化状态；重启后恢复布局与目录并启动新 shell；
   - 目录缺失回退到用户目录并提示；无效配置与恢复数据按默认启动并提示；写入采用临时文件 + 原子替换，中断不会破坏之前可用的数据。
@@ -26,11 +26,31 @@
 与终端内边距和行距都取自 `design/styles.css` 的主题令牌；窗格标题在运行任务时显示
 `进程名 · 运行中`，终端右缘有滚动条。
 
+终端绘制细节（对照 Zed 的实现补齐）：
+
+- 网格几何按设备像素对齐：行高、行数与网格原点都取整到物理像素，备用屏幕（TUI）时把
+  剩余高度放在网格上方、最后一行贴住底边，高 DPI（125%、150%）下文字与色块不会落在
+  半个物理像素上，调整窗口时基线不抖动；
+- 块元素（`▀█`、八分之一块、象限块、U+1FB00–U+1FB3B 六分之一块）按单元格子网格
+  （8×24）的矩形绘制，`░▒▓` 用整格不透明度替代字体的网点图案；像素画、阴影、二维码与
+  进度条没有字形缝隙，相邻同色矩形还会合并成一段；
+- ANSI 0–15 颜色对照所在单元格背景做 APCA 最小对比度调整（Lc 45）：浅色主题下的亮色
+  不再和背景糊在一起，深色主题下的暗色也不会看不见；TUI 明确指定的 256 色（索引 ≥ 16）
+  与真彩色、以及盒线、块元素、Powerline 等装饰字符保持原样；
+- 256 色索引完整展开（6×6×6 色立方与 24 级灰阶），不再回退到亮白；
+- 文本运行不再重复携带背景色，选择与底色只绘制一次。
+
 窗口不设底部状态栏：目录与 shell 已由窗格标题栏显示，标题栏右侧保留窗格数、UTF-8 与主题胶囊；
 分屏入口放在窗格标题栏，布局面板用 `Alt+Z` 或把窗格标题拖到顶部热区打开，标题栏不重复这两个入口。
 
 会话是真实 PTY：默认 shell 按 `pwsh`、Windows PowerShell、`COMSPEC` 顺序查找。
 分屏与新标签继承当前窗格的工作目录。布局操作只改变分屏树，会话、输出与滚动位置保持。
+
+工作目录跟踪：窗格标题、分屏 / 新标签继承与 `workspace.toml` 保存都读取 shell 的
+当前目录，取自进程信息。Windows PowerShell 的 `cd` 只更新 `$PWD`、不同步进程目录，
+所以启动 `powershell` / `pwsh` 时会注入一段提示符包装（`-NoExit -Command`，用户参数里
+已有 `-Command` / `-File` 等命令开关时跳过）：每次显示提示符前把当前目录同步给进程，
+`cd` 之后外部查询到的是真实位置。`cmd`、`bash` 等其他 shell 自身会同步进程目录，不做处理。
 
 快捷键：`Ctrl+Shift+T` 新标签、`Ctrl+Tab` / `Ctrl+Shift+Tab` 切换标签、`Ctrl+Shift+D/E` 向右 / 向下分屏、
 `Ctrl+Shift+W` 关闭窗格、`Ctrl+Shift+Enter` 缩放或还原、`Alt+方向键` 切换焦点、`Alt+Z` 布局面板、
@@ -43,6 +63,7 @@ cargo run -p glim            # 启动应用
 cargo test --workspace       # 纯逻辑 + 真实 PTY + GPUI 界面集成测试
 cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
+cargo build --release        # 分发给其他机器（调试版不能跨机器使用，见故障排查）
 ```
 
 界面集成测试使用无头窗口与真实 PowerShell 会话，覆盖分屏、拖动、
@@ -53,6 +74,29 @@ cargo fmt --all -- --check
 纯逻辑测试覆盖配置读写与安全替换、恢复数据的校验与重建、
 分屏树与最小尺寸约束；`config.toml` 与 `workspace.toml` 的读取失败
 都回退到默认值，不会阻塞启动。
+
+## 故障排查
+
+启动失败（窗口没有出现，或一闪而过）时先看数据目录的运行日志
+`%APPDATA%\Glim\glim.log`（目录可用 `GLIM_CONFIG_DIR` 覆盖）：每次启动写一行，
+启动阶段的 panic 追加一行（位置与消息），超过 256 KiB 后从空文件重新开始。
+
+- 没有任何「启动」行：进程没有进入主程序。常见原因是缺少 VC++ 运行库
+  （`VCRUNTIME140.dll`，安装 Microsoft Visual C++ 2015–2022 Redistributable），
+  或被安全软件 / SmartScreen 拦截（右键属性里「解除锁定」）。
+- `panic ... failed to initialize DirectX`：目标机器没有可用的 DirectX 11 设备。
+  界面由 GPUI 用 Direct3D 渲染，需要支持功能级别 10.1 以上的适配器；
+  虚拟机、远程桌面或缺少显卡驱动时可能不满足。
+- `failed to initialize DirectX: ... 系统找不到指定的路径 (os error 3)`：拷过去的是
+  **调试版**。调试版的 GPUI 会在运行时从编译机的 cargo registry 路径
+  （`CARGO_MANIFEST_DIR`）现场编译 HLSL，换机器或换用户后该路径不存在，
+  DirectX 初始化随之失败；分发请用 `cargo build --release`，着色器在编译期
+  编译并内嵌进 exe。
+- 其他 panic：按日志中的文件与行号定位。
+
+发行版没有控制台窗口（`windows_subsystem = "windows"`），只能看日志；
+调试版从终端运行并设置 `$env:RUST_BACKTRACE=1` 还可以在控制台看到同样的
+panic 与调用栈。
 
 ## 设计原型
 
