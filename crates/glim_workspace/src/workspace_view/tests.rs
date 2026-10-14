@@ -968,6 +968,51 @@ fn restores_tabs_layout_and_directories(cx: &mut TestAppContext) {
     );
 }
 
+/// 恢复后 shell 真的在保存的目录里启动（真实 PTY）；目录由进程信息核对。
+#[gpui_kit::test]
+fn restored_sessions_start_in_the_saved_directory(cx: &mut TestAppContext) {
+    let data = data_directory("restore-cwd");
+    let workdir = data.join("workdir");
+    std::fs::create_dir_all(&workdir).expect("create workdir");
+
+    let state = WorkspaceState {
+        version: 1,
+        window: None,
+        active_tab: 0,
+        tabs: vec![TabState {
+            tree: Some(leaf(Some(&workdir.to_string_lossy()), None)),
+            active_pane: Some(0),
+        }],
+    };
+    glim_settings::save_toml(&workspace_state::file_in(&data), &state).expect("write state");
+
+    let (handle, workspace) =
+        open_workspace_with_storage(cx, data.join("config.toml"), data.clone());
+    let pane = cx.update(|cx| active_pane(&workspace, cx));
+    let view = cx.update(|cx| pane_session(&workspace, pane, cx));
+    let expected = workdir.canonicalize().expect("canonicalize workdir");
+
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        let directory = cx
+            .update_window(handle, |_, window, cx| {
+                render_frame(window, cx);
+                view.read(cx).working_directory()
+            })
+            .expect("window stays open");
+        if let Some(directory) = directory {
+            assert_eq!(
+                directory.canonicalize().ok(),
+                Some(expected.clone()),
+                "shell 应在保存的目录中启动"
+            );
+            return;
+        }
+        assert!(Instant::now() < deadline, "会话未在超时内上报工作目录");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// 关闭时保存：布局、目录与窗口状态写入 workspace.toml。
 #[gpui_kit::test]
 fn closing_saves_layout_and_window_state(cx: &mut TestAppContext) {
@@ -994,6 +1039,8 @@ fn closing_saves_layout_and_window_state(cx: &mut TestAppContext) {
     visual.update(|_, cx| {
         assert_eq!(active_tree(&workspace, cx).leaves(), vec![first, second]);
     });
+    // 新窗格的 shell 也要进入空闲，才能验证「空闲工作区可以直接关闭」。
+    wait_until_idle(cx, &workspace);
     assert!(visual.simulate_close(), "空闲工作区可以直接关闭");
 
     let path = workspace_state::file_in(&data);
@@ -1072,6 +1119,64 @@ fn settings_dialog_saves_config(cx: &mut TestAppContext) {
         .expect("file exists");
     assert_eq!(settings.theme(), glim_settings::ThemeSetting::Light);
     assert_eq!(settings.scrollback(), glim_settings::DEFAULT_SCROLLBACK);
+    assert!(
+        settings.shell().is_none(),
+        "未选择具体 shell 时不写入 shell 配置"
+    );
+    assert!(settings.font_family().is_none(), "默认字族不写入配置");
+}
+
+/// 设置界面：shell 与字体下拉都从候选中选择，保存后写入配置。
+#[gpui_kit::test]
+fn settings_dialog_picks_shell_and_font_from_candidates(cx: &mut TestAppContext) {
+    let available = glim_terminal::available_shells();
+    if available.is_empty() {
+        // 没有可探测的 shell 时只验证对话框能打开（非 Windows 平台）。
+        return;
+    }
+    let installed = cx.update(|cx| cx.text_system().all_font_names());
+    if installed.is_empty() {
+        return;
+    }
+
+    let data = data_directory("settings-candidates");
+    let config_path = data.join("config.toml");
+    let (handle, _workspace) = open_workspace_with_storage(cx, config_path.clone(), data.clone());
+
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        press(window, "ctrl-,", cx);
+        assert!(is_visible(window, "settings-save"), "设置对话框应打开");
+        assert!(is_visible(window, "settings-font-family"), "字体下拉应存在");
+        assert!(
+            is_visible(window, "settings-shell-program"),
+            "shell 下拉应存在"
+        );
+
+        // shell：打开下拉，选中默认项之后的第一个候选，并在参数框输入参数。
+        click(window, "settings-shell-program", cx);
+        press(window, "down", cx);
+        press(window, "enter", cx);
+        click(window, "settings-shell-args", cx);
+        input_text(window, "-NoLogo", cx);
+
+        // 字体：搜索已安装字族并确认。
+        click(window, "settings-font-family", cx);
+        input_text(window, &installed[0], cx);
+        press(window, "enter", cx);
+
+        click(window, "settings-save", cx);
+        assert!(!is_visible(window, "settings-save"), "保存后对话框关闭");
+    })
+    .expect("window stays open");
+
+    let settings: glim_settings::Settings = glim_settings::load_toml(&config_path)
+        .expect("load")
+        .expect("file exists");
+    let shell = settings.shell().expect("选择的 shell 写入配置");
+    assert_eq!(shell.program(), available[0].program());
+    assert_eq!(shell.args(), ["-NoLogo"]);
+    assert_eq!(settings.font_family(), Some(installed[0].as_str()));
 }
 
 /// 设置变化：主题胶囊写入配置并立即生效；字体变化应用到主题。

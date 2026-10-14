@@ -20,7 +20,7 @@ pub use mouse::{MouseButton, MouseEventKind, MouseModifiers, encode_mouse_event}
 pub use options::TerminalOptions;
 pub use selection::{GridSelection, SelectionKind, SelectionSide};
 pub use session::{ScrollCommand, SearchMatch, SessionEvent, SessionEvents, SessionHandle};
-pub use shell::{ShellSpec, default_shell};
+pub use shell::{ShellSpec, available_shells, default_shell};
 pub use snapshot::{
     CellAttributes, CursorShape, CursorSnapshot, GridCell, GridLine, GridPoint, GridSnapshot,
     SelectionSpan, TermColor,

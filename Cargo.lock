@@ -2096,6 +2096,7 @@ name = "glim_settings"
 version = "0.1.0"
 dependencies = [
  "dirs 6.0.0",
+ "glim_terminal",
  "glim_ui",
  "gpui-base",
  "gpui-component",

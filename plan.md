@@ -23,7 +23,7 @@
 | `glim_workspace` | 标签页、窗格、稳定身份、分屏树、布局与工作区恢复 | `glim_terminal_view`、`glim_settings`、`glim_ui` |
 | `glim_terminal` | Alacritty 适配、PTY、终端网格、输入编码、进程信息与资源回收 | 无内部依赖，不依赖 GPUI |
 | `glim_terminal_view` | 终端绘制、焦点、输入法、鼠标、选择与滚动 | `glim_terminal`、`glim_ui` |
-| `glim_settings` | 类型化配置、文件读写、配置变化通知与基础设置界面 | `glim_ui` |
+| `glim_settings` | 类型化配置、文件读写、配置变化通知与基础设置界面 | `glim_ui`、`glim_terminal` |
 | `glim_ui` | 产品主题、字体、间距、图标、主题胶囊与公共展示组件 | 无内部依赖 |
 
 所有图形界面通过 `gpui-kit` 使用 GPUI。按能力组织代码，不再建立跨 crate 的通用 `models/`、`views/` 层；应用入口保持轻量。
