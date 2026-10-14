@@ -84,8 +84,10 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-msi.ps1
 ```
 
 脚本先做 `cargo build --release -p glim`，再用 WiX Toolset 3 生成
-`target\wix\Glim-<版本>-x64.msi`：每机器安装到 `Program Files\Glim`，写入开始菜单快捷方式，
-同版本号覆盖、高版本自动提示，卸载时一并清理。exe 内置图标与版本信息
+`target\wix\Glim-<版本>-x64.msi`：每机器安装，安装向导可修改**安装位置**、勾选是否
+**创建桌面快捷方式**（默认创建），写入开始菜单快捷方式，同版本号覆盖、高版本自动提示，
+卸载时一并清理。静默安装用 `DESKTOP_SHORTCUT=0` 关闭桌面快捷方式，`INSTALLFOLDER="路径"`
+指定安装位置。exe 内置图标与版本信息
 （`crates/glim/resources/windows`，图标是设计稿的「&gt;_」标记，见 [design/logo](design/logo/README.md)）。
 
 未检测到 WiX 时脚本会从 nuget.org 下载官方 `wix` 3.14.1 包到 `target\wix` 并校验 SHA256；

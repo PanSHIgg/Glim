@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Glim 安装包定义（WiX Toolset 3）。
      使用方式见 packaging/windows/build-msi.ps1；
-     $(var.*) 变量由 candle 的 -d 参数传入：GlimVersion、BinaryPath、IconPath、WelcomeRtf。 -->
+     $(var.*) 变量由 candle 的 -d 参数传入：GlimVersion、BinaryPath、IconPath、WelcomeRtf。
+
+     安装界面基于 WixUI_InstallDir 的流程（欢迎 → 许可 → 安装位置 → 确认）：
+     库里的 InstallDirDlg 无法覆盖，因此按 WiX 的惯例复制流程片段与对话框：
+     Glim_InstallDir（流程）引用自定义的 GlimInstallDirDlg（安装位置页 + 桌面快捷方式复选框），
+     其余对话框仍来自库（UIRef WixUI_Common）。 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product
       Id="*"
@@ -27,13 +32,110 @@
     <Icon Id="GlimIcon" SourceFile="$(var.IconPath)" />
     <WixVariable Id="WixUILicenseRtf" Value="$(var.WelcomeRtf)" />
 
-    <UIRef Id="WixUI_Minimal" />
-    <UIRef Id="WixUI_ErrorProgressText" />
+    <!-- 安装位置：安装位置页的目录框回写该属性，确定后 SetTargetPath 生效。 -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <!-- 桌面快捷方式：默认创建。安装界面的复选框写入该属性；
+         静默安装用 DESKTOP_SHORTCUT=0。
+         组件放在 Level=2 的特性里，安装级别默认 2（安装）；属性不为 1 时，
+         下面的动作在 CostFinalize 前把级别降到 1，该特性就不会被安装。 -->
+    <Property Id="DESKTOP_SHORTCUT" Value="1" />
+    <Property Id="INSTALLLEVEL" Value="2" />
+    <CustomAction Id="SetInstallLevelWithoutDesktopShortcut"
+                  Property="INSTALLLEVEL"
+                  Value="1"
+                  Execute="firstSequence" />
 
     <Feature Id="MainFeature" Title="Glim" Level="1">
       <ComponentRef Id="GlimApplication" />
       <ComponentRef Id="GlimStartMenuShortcut" />
     </Feature>
+    <Feature Id="DesktopShortcutFeature" Title="桌面快捷方式" Level="2">
+      <ComponentRef Id="GlimDesktopShortcut" />
+    </Feature>
+
+    <!-- 安装流程（复制自 WixUI_InstallDir.wxs，安装位置页改为 GlimInstallDirDlg）。 -->
+    <UI Id="Glim_InstallDir">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <Property Id="WixUI_Mode" Value="InstallDir" />
+
+      <DialogRef Id="BrowseDlg" />
+      <DialogRef Id="DiskCostDlg" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="GlimInstallDirDlg" />
+
+      <Publish Dialog="BrowseDlg" Control="OK" Event="DoAction" Value="WixUIValidatePath" Order="3">1</Publish>
+      <Publish Dialog="BrowseDlg" Control="OK" Event="SpawnDialog" Value="InvalidDirDlg" Order="4"><![CDATA[NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID<>"1"]]></Publish>
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
+
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="LicenseAgreementDlg">NOT Installed</Publish>
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">Installed AND PATCH</Publish>
+
+      <Publish Dialog="LicenseAgreementDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg">1</Publish>
+      <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog" Value="GlimInstallDirDlg">LicenseAccepted = "1"</Publish>
+
+      <Publish Dialog="GlimInstallDirDlg" Control="Back" Event="NewDialog" Value="LicenseAgreementDlg">1</Publish>
+      <Publish Dialog="GlimInstallDirDlg" Control="Next" Event="SetTargetPath" Value="[WIXUI_INSTALLDIR]" Order="1">1</Publish>
+      <Publish Dialog="GlimInstallDirDlg" Control="Next" Event="DoAction" Value="WixUIValidatePath" Order="2">NOT WIXUI_DONTVALIDATEPATH</Publish>
+      <Publish Dialog="GlimInstallDirDlg" Control="Next" Event="SpawnDialog" Value="InvalidDirDlg" Order="3"><![CDATA[NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID<>"1"]]></Publish>
+      <Publish Dialog="GlimInstallDirDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="4">WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID="1"</Publish>
+      <Publish Dialog="GlimInstallDirDlg" Control="ChangeFolder" Property="_BrowseProperty" Value="[WIXUI_INSTALLDIR]" Order="1">1</Publish>
+      <Publish Dialog="GlimInstallDirDlg" Control="ChangeFolder" Event="SpawnDialog" Value="BrowseDlg" Order="2">1</Publish>
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="GlimInstallDirDlg" Order="1">NOT Installed</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2">Installed AND NOT PATCH</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">Installed AND PATCH</Publish>
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg">1</Publish>
+
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg">1</Publish>
+
+      <Property Id="ARPNOMODIFY" Value="1" />
+    </UI>
+
+    <!-- 安装位置页：复制自 InstallDirDlg.wxs，新增「创建桌面快捷方式」复选框。 -->
+    <UI>
+      <Dialog Id="GlimInstallDirDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="!(loc.InstallDirDlgDescription)" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="!(loc.InstallDirDlgTitle)" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+
+        <Control Id="FolderLabel" Type="Text" X="20" Y="60" Width="290" Height="30" NoPrefix="yes" Text="!(loc.InstallDirDlgFolderLabel)" />
+        <Control Id="Folder" Type="PathEdit" X="20" Y="100" Width="320" Height="18" Property="WIXUI_INSTALLDIR" Indirect="yes" />
+        <Control Id="ChangeFolder" Type="PushButton" X="20" Y="120" Width="56" Height="17" Text="!(loc.InstallDirDlgChange)" />
+
+        <Control Id="DesktopShortcutCheckbox"
+                 Type="CheckBox"
+                 X="20" Y="146" Width="320" Height="17"
+                 Property="DESKTOP_SHORTCUT"
+                 CheckBoxValue="1"
+                 Text="创建桌面快捷方式(&amp;D)" />
+      </Dialog>
+    </UI>
+
+    <UIRef Id="WixUI_Common" />
+    <UIRef Id="WixUI_ErrorProgressText" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
@@ -57,7 +159,7 @@
           <!-- 开始菜单快捷方式按用户写入：以 HKCU 注册表值作为组件 KeyPath
                （ICE43/ICE57 要求非公告快捷方式这样做）。 -->
           <Component Id="GlimStartMenuShortcut" Guid="{8CA047AD-246D-43B6-BFA7-307AA3CC125F}">
-            <Shortcut Id="GlimShortcut"
+            <Shortcut Id="GlimStartMenuShortcutLink"
                       Name="Glim"
                       Description="Glim 终端"
                       Target="[INSTALLFOLDER]glim.exe"
@@ -76,6 +178,31 @@
           </Component>
         </Directory>
       </Directory>
+      <Directory Id="DesktopFolder">
+        <!-- 可选组件：随 DesktopShortcutFeature 一起安装 / 卸载。 -->
+        <Component Id="GlimDesktopShortcut" Guid="{94886779-5700-48F5-B78B-D77D29769A4C}">
+          <Shortcut Id="GlimDesktopShortcutLink"
+                    Name="Glim"
+                    Description="Glim 终端"
+                    Target="[INSTALLFOLDER]glim.exe"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="GlimIcon"
+                    IconIndex="0" />
+          <RegistryValue Root="HKCU"
+                         Key="Software\Glim"
+                         Name="DesktopShortcut"
+                         Type="integer"
+                         Value="1"
+                         KeyPath="yes" />
+        </Component>
+      </Directory>
     </Directory>
+
+    <InstallUISequence>
+      <Custom Action="SetInstallLevelWithoutDesktopShortcut" Before="CostFinalize">NOT DESKTOP_SHORTCUT=&quot;1&quot;</Custom>
+    </InstallUISequence>
+    <InstallExecuteSequence>
+      <Custom Action="SetInstallLevelWithoutDesktopShortcut" Before="CostFinalize">NOT DESKTOP_SHORTCUT=&quot;1&quot;</Custom>
+    </InstallExecuteSequence>
   </Product>
 </Wix>
