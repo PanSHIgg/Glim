@@ -132,7 +132,7 @@ pub fn open_settings_dialog(window: &mut Window, cx: &mut App) {
     });
     let font_size = cx.new(|cx| {
         let mut input = InputState::new(window, cx)
-            .placeholder("默认 13")
+            .placeholder("默认")
             .min(MIN_FONT_SIZE as f64)
             .max(MAX_FONT_SIZE as f64);
         if let Some(size) = current.font_size() {
@@ -299,7 +299,7 @@ pub fn open_settings_dialog(window: &mut Window, cx: &mut App) {
                                     .gap_2()
                                     .items_start()
                                     .child(div().flex_1().min_w_0().child(Input::new(&font_family)))
-                                    .child(div().w_24().child(NumberInput::new(&font_size))),
+                                    .child(div().w_32().child(NumberInput::new(&font_size))),
                             )
                             .child(
                                 div()
