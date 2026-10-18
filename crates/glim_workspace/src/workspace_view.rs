@@ -263,6 +263,7 @@ impl WorkspaceView {
     /// 创建工作区：恢复上次布局，或启动一个真实终端，并登记窗口关闭确认。
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         bind_workspace_keys(cx);
+        glim_terminal_view::bind_keys(cx);
 
         let settings = glim_settings::current(cx);
         let theme_preference = settings.theme().to_preference();
@@ -1379,8 +1380,7 @@ impl WorkspaceView {
             }))
             .children(tabs.into_iter().map(|(id, title)| {
                 Tab::new()
-                    .icon(IconName::Terminal)
-                    .label(title)
+                    .aria_label(title)
                     .min_w(px(112.))
                     .max_w(px(176.))
                     .suffix(
@@ -1393,6 +1393,16 @@ impl WorkspaceView {
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.close_tab(id, window, cx);
                             })),
+                    )
+                    // 关闭按钮占在标签右端；内容区左侧补上与它等宽的占位
+                    // （1.25rem 按钮 + 0.25rem 间距），图标才会落在标签正中。
+                    .child(
+                        div().flex_1().pl_6().flex().justify_center().child(
+                            div()
+                                .id(("tab-icon", id.value()))
+                                .test_support()
+                                .child(Icon::new(IconName::Terminal).size_4()),
+                        ),
                     )
             }));
 

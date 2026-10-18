@@ -1259,3 +1259,110 @@ fn settings_changes_persist_and_apply(cx: &mut TestAppContext) {
     })
     .expect("window stays open");
 }
+
+/// 标签图标居中：图标在标签正中（计及右端的关闭按钮），关闭按钮贴右端。
+#[gpui_kit::test]
+fn tab_icon_is_centered_and_close_stays_at_the_right_end(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        let tab = find(window, 0_usize).bounds();
+        let tab_id = active_tab_id(&workspace, cx);
+        let icon = find(window, ("tab-icon", tab_id.value())).bounds();
+        let close = find(window, ("tab-close", tab_id.value())).bounds();
+
+        assert!(
+            (icon.center().x - tab.center().x).abs() <= px(2.),
+            "图标应落在标签正中：icon={icon:?} tab={tab:?} close={close:?}"
+        );
+        assert!(
+            tab.right() - close.right() <= px(4.),
+            "关闭按钮应贴标签右端：close={close:?} tab={tab:?}"
+        );
+        for (what, bounds) in [("图标", icon), ("关闭按钮", close)] {
+            assert!(
+                (bounds.center().y - tab.center().y).abs() <= px(2.),
+                "{what}应垂直居中：{bounds:?} tab={tab:?}"
+            );
+        }
+    })
+    .expect("window stays open");
+}
+
+/// 标签点击：图标位于内容区内，不遮挡标签自身的点击。
+#[gpui_kit::test]
+fn clicking_the_tab_selects_it(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| {
+        render_frame(window, cx);
+        let first_tab = active_tab_id(&workspace, cx);
+        press(window, "ctrl-shift-t", cx);
+        let second_tab = active_tab_id(&workspace, cx);
+        assert_ne!(first_tab, second_tab, "新建标签页");
+
+        click(window, ("tab-icon", first_tab.value()), cx);
+        assert_eq!(active_tab_id(&workspace, cx), first_tab, "点击标签内容切换");
+        click(window, ("tab-icon", second_tab.value()), cx);
+        assert_eq!(
+            active_tab_id(&workspace, cx),
+            second_tab,
+            "点击标签内容切换"
+        );
+    })
+    .expect("window stays open");
+}
+
+/// 复制：有选择时 `Ctrl+C` 复制（Windows 习惯），随后按键交给终端。
+#[gpui_kit::test]
+fn ctrl_c_copies_the_selection_and_reaches_the_terminal_without_one(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    cx.update_window(handle, |_, window, cx| render_frame(window, cx))
+        .expect("window stays open");
+    wait_until_idle(cx, &workspace);
+
+    // 提示符出现需要真实时间：每一轮重新拖选并复制，直到选中的是实际文本。
+    let copied = cx
+        .update_window(handle, |_, window, cx| {
+            let pane = active_pane(&workspace, cx);
+            let pane_bounds = find(window, ("pane", pane.value())).bounds();
+            let header = find(window, ("pane-drag", pane.value())).bounds();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                // 拖过整个终端区域：选择覆盖当前全部可见文本。
+                drag(
+                    window,
+                    point(header.left() + px(8.), header.bottom() + px(20.)),
+                    point(pane_bounds.right() - px(8.), pane_bounds.bottom() - px(8.)),
+                    cx,
+                );
+                press(window, "ctrl-c", cx);
+
+                let copied = cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .filter(|text| !text.trim().is_empty());
+                if let Some(copied) = copied {
+                    break copied;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "shell 输出未在超时内出现，Ctrl+C 没有复制到文本"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        })
+        .expect("window stays open");
+
+    // 复制清除高亮：此时按键回到终端，剪贴板保持原内容。
+    cx.update_window(handle, |_, window, cx| {
+        press(window, "ctrl-c", cx);
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some(copied.as_str()),
+            "无选择时 Ctrl+C 不写剪贴板"
+        );
+    })
+    .expect("window stays open");
+}

@@ -88,6 +88,18 @@ pub enum TerminalViewEvent {
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
 
+/// 注册终端键位；键盘映射属于整个窗口，由工作区在创建窗口时调用一次。
+///
+/// 与 Windows Terminal 一致：有选择时 `Ctrl+C` 复制，没有选择时按键
+/// 仍然写入 PTY（shell 收到中断）；`Ctrl+Shift+C/V` 始终复制 / 粘贴。
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-c", CopySelection, Some("Terminal && selection")),
+        KeyBinding::new("ctrl-shift-c", CopySelection, Some("Terminal")),
+        KeyBinding::new("ctrl-shift-v", PasteClipboard, Some("Terminal")),
+    ]);
+}
+
 /// 当前选择意图；拖动时持续更新端点。
 struct SelectionState {
     anchor: GridPoint,
@@ -733,14 +745,21 @@ impl TerminalView {
 
     // ---- Actions ----
 
+    /// 复制当前选择到剪贴板并清除高亮。
+    ///
+    /// 空选择没有可复制的内容，但同样清除高亮：之后 `Ctrl+C` 回到终端
+    /// （写入中断）而不是被复制绑定截住。
     fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
-            return;
-        };
-        if let Some(text) = session.selection_text()
-            && !text.is_empty()
+        match self
+            .session
+            .as_ref()
+            .and_then(|session| session.selection_text())
         {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            Some(text) if !text.is_empty() => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.clear_selection(cx);
+            }
+            _ => self.clear_selection(cx),
         }
     }
 
@@ -941,7 +960,12 @@ impl TerminalView {
         h_flex()
             .size_full()
             .track_focus(&self.focus_handle)
-            .key_context("Terminal")
+            // 有选择时追加 "selection"：Ctrl+C 的复制绑定只在该上下文生效。
+            .key_context(if self.selection.is_some() {
+                "Terminal selection"
+            } else {
+                "Terminal"
+            })
             .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::paste_clipboard))
